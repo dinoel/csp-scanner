@@ -3,6 +3,7 @@
 Two scanners for US equity options using free delayed data from Yahoo Finance.
 
 - **`csp_scanner.py`** — Short Put (Cash-Secured Put) scanner
+- **`skew_scanner.py`** — Volatility skew / Risk Reversal scanner
 
 No API keys required.
 
@@ -13,8 +14,8 @@ No API keys required.
 **Requirements:** Python 3.10+
 
 ```bash
-git clone https://github.com/dinoel/csp-scanner.git
-cd csp-scanner
+git clone https://github.com/yourname/skew-scanner.git
+cd skew-scanner
 
 python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
@@ -33,6 +34,14 @@ python csp_scanner.py
 ```
 
 Scans the universe, scores every (expiry × strike) combination, and prints the top results sorted by composite score. Results are also saved to `csp_scan.csv`.
+
+### Skew Scanner
+
+```bash
+python skew_scanner.py
+```
+
+Scans for volatility skew — tickers where put IV diverges significantly from call IV.
 
 ---
 
@@ -83,8 +92,12 @@ MAX_WORKERS  = 6          # parallel workers; reduce if you hit Yahoo rate limit
 | BE(Bid) | Break-even price = `strike − bid` |
 | %BE | Downside cushion: `(price − BE) / price × 100` |
 | Vol / OI | Volume and open interest |
+| Rating | Analyst consensus: STR_BUY / BUY / HOLD / UNDP / SELL |
+| Target | Analyst mean price target |
+| Upside% | `(target − price) / price × 100` |
 | IVR | IV Rank: where current IV sits in 52-week range (0–100) |
 | IV% | Implied volatility at the strike |
+| HV30% | 30-day realized (historical) volatility, annualized |
 | Delta | Put delta (negative) |
 | θ/day | Daily theta — $ earned per share per day from time decay |
 | Ret% | Return on capital: `bid / strike × 100` |

@@ -1,0 +1,15 @@
+# Cache databases
+yf_cache*.db
+
+# Scan results
+*.csv
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE / tooling
+.vscode/
+.claude/

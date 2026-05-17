@@ -28,15 +28,20 @@ import yfinance as yf
 from cache import CACHE
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
-#UNIVERSE: str | list[str] = ["NVDA", "INTC", "AMD", "PLTR", "MCD", "ASTS", "TEAM", "NBIS", "IREN", "EMR", "ORCL", "DELL", "SMCI", "HAL", "GLW", "FCX"]
-UNIVERSE: str | list[str] = "sp500"
-SAMPLE_SIZE: int | None = 101        # tickers to sample; None = full universe
+#UNIVERSE: str | list[str] = ["NVDA", "INTC", "AMD", "PLTR", "MCD", "ASTS", "TEAM", "NBIS", "IREN", "EMR", "ORCL", "DELL", "SMCI", "HAL", "GLW", "FCX", "HUT", "ARM"]
+#UNIVERSE: str | list[str] = ["CRWV"]
+UNIVERSE: str | list[str] = "screener"
+SAMPLE_SIZE: int | None = None        # tickers to sample; None = full universe
 RISK_PROFILE = "medium"              # "low" | "medium" | "high"
 RISK_FREE_RATE = 0.05
 MIN_BID = 0.05
 COMPUTE_IV_RANK = True
 MAX_WORKERS = 6      # parallel ticker scans; keep ≤8 to avoid Yahoo rate limits
-CSV_OUT = "csp_scan.csv"
+CSV_OUT  = "csp_scan.csv"
+HTML_OUT = "csp_scan.html"
+ENABLE_AI_ANALYSIS = True    # set False or unset ANTHROPIC_API_KEY to skip
+AI_TOP_N = 10                 # how many top candidates to send to Claude
+AI_MODEL = "claude-opus-4-7"
 
 # ── Risk profiles ─────────────────────────────────────────────────────────────
 #
@@ -60,14 +65,14 @@ _PROFILES: dict[str, dict] = {
         DTE_MIN=7,   DTE_MAX=51,
         DELTA_MIN=0.05, DELTA_MAX=0.50,
         MAX_STRIKE=200,
-        MIN_OPEN_INTEREST=50,  MIN_VOLUME=500,  MAX_SPREAD_PCT=0.50,
+        MIN_OPEN_INTEREST=50,  MIN_VOLUME=200,  MAX_SPREAD_PCT=0.50,
         SCORE_W_PROB=0.45, SCORE_W_RETURN=0.25, SCORE_W_SAFETY=0.20, SCORE_W_MA200=0.10,
     ),
     "high": dict(
         DTE_MIN=7,   DTE_MAX=31,           # shorter DTE → higher annualized return
         DELTA_MIN=0.15, DELTA_MAX=0.50,    # closer ATM — more premium, more risk
         MAX_STRIKE=200,
-        MIN_OPEN_INTEREST=50,  MIN_VOLUME=10,  MAX_SPREAD_PCT=0.60,
+        MIN_OPEN_INTEREST=50,  MIN_VOLUME=200,  MAX_SPREAD_PCT=0.30,
         SCORE_W_PROB=0.30, SCORE_W_RETURN=0.45, SCORE_W_SAFETY=0.15, SCORE_W_MA200=0.10,
     ),
 }
@@ -103,13 +108,18 @@ class PutRow:
     open_int: int
     iv_rank: float        # 0-100 (NaN if unavailable)
     iv: float             # put IV at strike
+    hv30: float           # 30-day realized vol, annualized %
     delta: float          # negative (put delta)
     theta: float          # daily $ gain for seller (positive)
     ret: float            # bid/strike*100  (return on capital %)
     ann_rtn: float        # annualized return %
     profit_prob: float    # P(expires OTM) %
-    earnings_date: str        # earnings date 'YYYY-MM-DD' if in window, else ''
+    earnings_date: str    # earnings date 'YYYY-MM-DD' if in window, else ''
     ma200_pct: float      # (spot - MA200) / MA200 * 100; positive = above MA200
+    analyst_rating: str   # consensus: "strong_buy"|"buy"|"hold"|"underperform"|"sell"|""
+    analyst_num: int      # number of analysts covering the stock
+    analyst_target: float # analyst mean price target
+    analyst_upside: float # (target - price) / price * 100
     score: float          # composite score (higher = better)
 
 
@@ -371,6 +381,18 @@ def get_iv_rank(hist: pd.DataFrame, current_iv: float) -> float:
         return float("nan")
 
 
+def compute_hv30(hist: pd.DataFrame) -> float:
+    """30-day annualized historical volatility (realized vol) in %."""
+    try:
+        if hist is None or len(hist) < 31:
+            return float("nan")
+        close = hist["Close"].squeeze()
+        log_ret = np.log(close / close.shift(1)).dropna()
+        return float(log_ret.iloc[-30:].std() * math.sqrt(252) * 100)
+    except Exception:
+        return float("nan")
+
+
 def check_earnings(cal: dict, today, expiry_date) -> Optional[str]:
     """Return earnings date string 'YYYY-MM-DD' if earnings fall in window, else None."""
     try:
@@ -434,6 +456,16 @@ IWM_URL = (
     "/1467271812596.ajax?fileType=csv&dataType=fund"
 )
 
+def _fetch_analyst(symbol: str) -> dict:
+    info = yf.Ticker(symbol).info
+    target_raw = info.get("targetMeanPrice")
+    return {
+        "rating":       info.get("recommendationKey") or "",
+        "target":       float(target_raw) if target_raw else float("nan"),
+        "num_analysts": int(info.get("numberOfAnalystOpinions") or 0),
+    }
+
+
 def _fetch_russell2000() -> list[str]:
     import requests
     resp = requests.get(IWM_URL, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
@@ -488,8 +520,13 @@ def scan_ticker(symbol: str) -> Optional[PutRow]:
     # Fetch once — shared across all expiries
     hist      = CACHE.fetch(f"history:{symbol}", lambda: _fetch_history(symbol)) if COMPUTE_IV_RANK else None
     cal       = CACHE.fetch(f"calendar:{symbol}", lambda: _fetch_calendar(symbol))
+    analyst   = CACHE.fetch(f"analyst:{symbol}", lambda: _fetch_analyst(symbol))
     ma200     = get_ma200(hist)
     ma200_pct = _r((spot - ma200) / ma200 * 100.0) if not math.isnan(ma200) else float("nan")
+    hv30      = _r(compute_hv30(hist), 1)
+    a_rating  = analyst.get("rating", "")
+    a_target  = analyst.get("target", float("nan"))
+    a_upside  = _r((a_target - spot) / spot * 100) if not math.isnan(a_target) else float("nan")
 
     best_row:   Optional[PutRow] = None
     best_score: float = float("-inf")
@@ -545,6 +582,7 @@ def scan_ticker(symbol: str) -> Optional[PutRow]:
                 open_int=oi,
                 iv_rank=ivr,
                 iv=_r(iv * 100),
+                hv30=hv30,
                 delta=_r(delta, 3),
                 theta=_r(theta, 3),
                 ret=_r(ret),
@@ -552,6 +590,10 @@ def scan_ticker(symbol: str) -> Optional[PutRow]:
                 profit_prob=_r(pp, 1),
                 earnings_date=earn or "",
                 ma200_pct=ma200_pct,
+                analyst_rating=a_rating,
+                analyst_num=analyst.get("num_analysts", 0),
+                analyst_target=_r(a_target, 2),
+                analyst_upside=a_upside,
                 score=_r(sc, 1),
             )
 
@@ -580,7 +622,277 @@ def get_tickers() -> list[str]:
         sp = CACHE.fetch("sp500", _fetch_sp500)
         r2k = CACHE.fetch("russell2000", _fetch_russell2000)
         return list(dict.fromkeys(sp + r2k))  # merge, deduplicate, preserve order
+    if UNIVERSE == "screener":
+        from screener import get_candidates
+        return get_candidates(max_price=MAX_STRIKE or 200, verbose=True)
     raise ValueError(f"Unknown universe: {UNIVERSE!r}")
+
+
+# ── HTML output ───────────────────────────────────────────────────────────────
+
+# Analyst rating maps — shared by terminal and HTML renderers
+_RATING_ABBREV = {
+    "strong_buy": "STR_BUY", "buy": "BUY", "hold": "HOLD",
+    "underperform": "UNDP",   "sell": "SELL",
+}
+_RATING_CLASS = {
+    "strong_buy": "r-sb", "buy": "r-b", "hold": "r-h",
+    "underperform": "r-s", "sell": "r-s",
+}
+
+_CSS = """\
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0d1117;color:#c9d1d9;font:12px/1.5 'Consolas','Courier New',monospace;padding:20px}
+h1{color:#58a6ff;font-size:16px;margin-bottom:4px}
+h2{color:#3fb950;font-size:12px;margin:28px 0 8px;padding-bottom:4px;border-bottom:1px solid #21262d;text-transform:uppercase;letter-spacing:.05em}
+.meta{color:#8b949e;font-size:11px;margin-bottom:20px}
+.wrap{overflow-x:auto;margin-bottom:4px}
+table{border-collapse:collapse;white-space:nowrap}
+thead th{background:#161b22;color:#58a6ff;padding:5px 10px;cursor:pointer;user-select:none;border-bottom:2px solid #30363d;text-align:right;position:sticky;top:0;z-index:1}
+thead th:first-child{text-align:left}
+thead th:hover{background:#1f2937}
+thead th.asc::after{content:' ▲';font-size:9px;opacity:.8}
+thead th.desc::after{content:' ▼';font-size:9px;opacity:.8}
+tbody td{padding:3px 10px;text-align:right;border-bottom:1px solid #161b22;color:#e6edf3}
+tbody td:first-child{text-align:left}
+tbody tr:hover td{filter:brightness(1.5)}
+.earn{color:#f0883e!important;font-weight:700}
+.r-sb{color:#56d364;font-weight:700}.r-b{color:#3fb950}
+.r-h{color:#d29922}.r-s{color:#f85149}
+.empty{color:#6e7681;font-style:italic;font-size:11px;padding:4px 0}
+.failed{color:#f85149;font-size:11px;margin-top:24px}
+.ai-box{background:#111827;border:1px solid #30363d;border-left:3px solid #58a6ff;
+        border-radius:4px;padding:14px 18px;margin:8px 0 4px;max-width:900px;
+        font-size:12px;line-height:1.7;color:#c9d1d9}
+.ai-box h3{color:#58a6ff;font-size:12px;margin:10px 0 4px}
+.ai-box strong{color:#e6edf3}
+.ai-box p{margin:0 0 6px}
+"""
+
+_JS = """\
+document.querySelectorAll('table[id]').forEach(t=>{
+  const hs=[...t.querySelectorAll('thead th')];let s={c:-1,a:1};
+  hs.forEach((h,i)=>{
+    h.addEventListener('click',()=>{
+      const a=s.c===i?-s.a:1;s={c:i,a};
+      hs.forEach(x=>x.classList.remove('asc','desc'));
+      h.classList.add(a>0?'asc':'desc');
+      const tb=t.querySelector('tbody');
+      [...tb.rows].sort((x,y)=>{
+        const av=x.cells[i].dataset.v,bv=y.cells[i].dataset.v;
+        const an=parseFloat(av),bn=parseFloat(bv);
+        const d=(!isNaN(an)&&!isNaN(bn))?an-bn:String(av).localeCompare(String(bv));
+        return a*d;
+      }).forEach(r=>tb.append(r));
+    });
+  });
+});
+"""
+
+
+def _score_bg(score: float, lo: float, hi: float) -> str:
+    """Row background: #111827 (dark) → #15803d (green) by normalized score."""
+    try:
+        t = 0.0 if hi <= lo else max(0.0, min(1.0, (float(score) - lo) / (hi - lo)))
+    except (TypeError, ValueError):
+        t = 0.0
+    return f"rgb({int(17+t*4)},{int(24+t*104)},{int(39+t*22)})"
+
+
+def _html_table(subset: pd.DataFrame, fields: list, headers: list,
+                table_id: str, s_lo: float, s_hi: float) -> str:
+    """Return a sortable HTML <table> string for the given DataFrame subset."""
+    import html as _he
+    if subset.empty:
+        return '<p class="empty">No results in this category.</p>'
+
+    head = ("<thead><tr>"
+            + "".join(f"<th>{_he.escape(h)}</th>" for h in headers)
+            + "</tr></thead>")
+    rows = []
+    for rec in subset.to_dict("records"):
+        is_earn = bool(rec.get("earnings_date", ""))
+        bg      = _score_bg(rec.get("score", float("nan")), s_lo, s_hi)
+        cells   = []
+        for f in fields:
+            v = rec.get(f)
+            if v is None or (isinstance(v, float) and math.isnan(v)):
+                cells.append('<td data-v="-9999">—</td>')
+            elif f == "symbol":
+                s = _he.escape(str(v))
+                if is_earn:
+                    cells.append(f'<td data-v="{s}" class="earn">{s} [!]</td>')
+                else:
+                    cells.append(f'<td data-v="{s}">{s}</td>')
+            elif f == "analyst_rating":
+                raw  = str(v)
+                abbr = _RATING_ABBREV.get(raw, raw)
+                n    = int(rec.get("analyst_num") or 0)
+                disp = _he.escape(f"{abbr} ({n})" if abbr and n > 0 else abbr or "—")
+                cls  = _RATING_CLASS.get(raw, "")
+                ca   = f' class="{cls}"' if cls else ""
+                cells.append(f'<td data-v="{_he.escape(raw)}"{ca}>{disp}</td>')
+            elif isinstance(v, int):
+                cells.append(f'<td data-v="{v}">{v:,}</td>')
+            elif isinstance(v, float):
+                cells.append(f'<td data-v="{v}">{v}</td>')
+            else:
+                cells.append(f'<td data-v="-9999">{_he.escape(str(v))}</td>')
+        rows.append(f'<tr style="background:{bg}">{"".join(cells)}</tr>')
+
+    body = "<tbody>" + "".join(rows) + "</tbody>"
+    return f'<div class="wrap"><table id="{table_id}">{head}{body}</table></div>'
+
+
+def ai_analysis(top_rows: list) -> str | None:
+    """Send top N put candidates to Claude for qualitative analysis.
+
+    Requires: pip install anthropic  +  ANTHROPIC_API_KEY env var.
+    Returns the analysis text, or None if unavailable."""
+    if not ENABLE_AI_ANALYSIS:
+        return None
+    try:
+        import anthropic
+    except ImportError:
+        print("[AI] 'anthropic' not installed — run: pip install anthropic")
+        return None
+    import os
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        print("[AI] ANTHROPIC_API_KEY not set — skipping AI analysis")
+        return None
+
+    lines = [
+        "You are a quantitative options analyst. Analyze these cash-secured put (short put) "
+        "candidates for a retail trader. Data is from a systematic scanner using Yahoo Finance "
+        "(15–20 min delayed).\n\n"
+        "Candidates (sorted by composite score, best first):\n\n"
+    ]
+    for i, r in enumerate(top_rows, 1):
+        earn = f"⚠ Earnings {r.earnings_date} within window" if r.earnings_date else "No earnings in window"
+        rating_str = f"{r.analyst_rating} ({r.analyst_num} analysts)" if r.analyst_rating else "n/a"
+        lines.append(
+            f"{i}. {r.symbol}  —  Put ${r.strike}  exp {r.exp_date}  DTE {r.dte}\n"
+            f"   Price ${r.price}  |  Bid ${r.bid}  |  Ann return {r.ann_rtn}%  |  Profit prob {r.profit_prob}%\n"
+            f"   IV {r.iv}%  |  HV30 {r.hv30}%  |  IVR {r.iv_rank}  |  Delta {r.delta}\n"
+            f"   Moneyness {r.moneyness:+.1f}%  |  vs EM {r.vs_em:.0f}%  |  MA200 {r.ma200_pct:+.1f}%\n"
+            f"   Analyst: {rating_str}  |  Target ${r.analyst_target}  |  Upside {r.analyst_upside:+.1f}%\n"
+            f"   Score {r.score}  |  {earn}\n\n"
+        )
+    lines.append(
+        "For each position provide:\n"
+        "- 2-3 sentences: key attractiveness factors + main risk(s)\n"
+        "- Risk: Low / Medium / High\n"
+        "- Verdict: Recommended / Neutral / Avoid\n\n"
+        "End with a 2-sentence overall market observation implied by these results.\n"
+        "Be concise and actionable. No generic disclaimers."
+    )
+
+    print(f"[AI] Requesting analysis of top {len(top_rows)} candidates from {AI_MODEL}...")
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        msg = client.messages.create(
+            model=AI_MODEL,
+            max_tokens=1800,
+            messages=[{"role": "user", "content": "".join(lines)}],
+        )
+        return msg.content[0].text
+    except Exception as e:
+        print(f"[AI] Error: {e}")
+        return None
+
+
+def _md_to_html(text: str) -> str:
+    """Minimal Markdown → HTML: bold, headers, paragraphs."""
+    import html as _he, re
+    t = _he.escape(text)
+    t = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", t)
+    t = re.sub(r"^#{1,3} (.+)$", r"<h3>\1</h3>", t, flags=re.MULTILINE)
+    t = t.replace("\n\n", "</p><p>").replace("\n", "<br>")
+    return f"<p>{t}</p>"
+
+
+def write_html(df: pd.DataFrame, config_str: str, failed: list,
+               ai_text: str | None = None) -> None:
+    """Write all scanner results to a self-contained dark-themed sortable HTML page."""
+    import html as _he
+    import datetime as _dt
+
+    scores = df["score"].dropna()
+    s_lo, s_hi = float(scores.min()), float(scores.max())
+
+    MAIN_F = ["symbol","score","price","analyst_rating","analyst_target","analyst_upside",
+              "exp_date","dte","strike","moneyness","exp_move_pct","vs_em",
+              "bid","ask","spread","volume","be_bid","pct_be_bid","open_int",
+              "iv_rank","iv","hv30","delta","theta","ret","ann_rtn","profit_prob","ma200_pct"]
+    MAIN_H = ["Symbol","Score","Price~","Rating","Target","Upside%",
+              "Exp Date","DTE","Strike","Mness%","EM%","vs EM%",
+              "Bid","Ask","Spread","Vol","BE(Bid)","%BE","OI",
+              "IVR","IV%","HV30%","Delta","θ/day","Ret%","AnnRtn%","PProb%","MA200%"]
+
+    IV_F = ["symbol","price","analyst_rating","analyst_target","analyst_upside",
+            "exp_date","strike","exp_move_pct","vs_em","bid","ask","spread",
+            "volume","iv_rank","iv","hv30","ann_rtn","theta","profit_prob"]
+    IV_H = ["Symbol","Price~","Rating","Target","Upside%",
+            "Exp Date","Strike","EM%","vs EM%","Bid","Ask","Spread",
+            "Vol","IVR","IV%","HV30%","AnnRtn%","θ/day","PProb%"]
+
+    no_earn  = df["earnings_date"].eq("")
+    high_ivr = df["iv_rank"] >= 50
+    iv_gt_hv = df["iv"] > df["hv30"]
+
+    parts: list[str] = [
+        f'<h1>Short Put Scanner</h1>'
+        f'<p class="meta">{_he.escape(config_str)}'
+        f'<br>Generated {_dt.datetime.now().strftime("%Y-%m-%d %H:%M")}</p>'
+    ]
+
+    if ai_text:
+        parts.append(
+            f'<h2>AI Analysis (top {AI_TOP_N} by score)</h2>'
+            f'<div class="ai-box">{_md_to_html(ai_text)}</div>'
+        )
+
+    earn_df = df[df["earnings_date"].ne("")]
+    if not earn_df.empty:
+        parts.append("<h2>Earnings Within Expiry Window</h2>")
+        parts.append(_html_table(earn_df.sort_values("score", ascending=False),
+                                 MAIN_F, MAIN_H, "tbl-earn", s_lo, s_hi))
+
+    parts.append("<h2>All Results</h2>")
+    parts.append(_html_table(df.sort_values("ann_rtn", ascending=False),
+                             MAIN_F, MAIN_H, "tbl-main", s_lo, s_hi))
+
+    for title, mask, tid in [
+        ("HIGH IVR + IV > HV30 — Best Premium Candidates",
+         high_ivr &  iv_gt_hv & no_earn, "tbl-both"),
+        ("HIGH IVR (>=50) Only",
+         high_ivr & ~iv_gt_hv & no_earn, "tbl-ivr"),
+        ("IV > HV30 Only",
+        ~high_ivr &  iv_gt_hv & no_earn, "tbl-hv"),
+    ]:
+        parts.append(f"<h2>{_he.escape(title)}</h2>")
+        parts.append(_html_table(df[mask].sort_values("score", ascending=False),
+                                 IV_F, IV_H, tid, s_lo, s_hi))
+
+    if failed:
+        fs = ", ".join(_he.escape(s) for s in failed)
+        parts.append(f'<p class="failed">[!] {len(failed)} tickers skipped (rate limited): {fs}</p>')
+
+    page = (
+        "<!DOCTYPE html><html lang='en'><head>"
+        "<meta charset='UTF-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>Short Put Scanner</title>"
+        f"<style>{_CSS}</style>"
+        "</head><body>"
+        + "".join(parts)
+        + f"<script>{_JS}</script></body></html>"
+    )
+
+    with open(HTML_OUT, "w", encoding="utf-8") as fh:
+        fh.write(page)
+    print(f"Saved HTML  to {HTML_OUT}")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -602,10 +914,10 @@ def main():
           f"|  strike≤{MAX_STRIKE}  |  vol≥{MIN_VOLUME}  spread≤{MAX_SPREAD_PCT:.0%}\n")
 
     rows: list[PutRow] = []
+    failed: list[str] = []   # tickers that hit max rate-limit wait
     rate_errors = 0
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
         futures = {pool.submit(scan_ticker, sym): sym for sym in tickers}
-        rate_errors = 0
         for fut in as_completed(futures):
             sym = futures[fut]
             try:
@@ -618,8 +930,13 @@ def main():
                 if "Rate" in msg or "429" in msg:
                     rate_errors += 1
                     wait = min(5 * rate_errors, 60)
-                    print(f"[{sym}] rate limited — waiting {wait}s...")
-                    time.sleep(wait)
+                    if wait >= 60:
+                        print(f"[{sym}] rate limited — max wait reached, skipping")
+                        failed.append(sym)
+                        rate_errors = 0   # reset so next ticker gets a fresh chance
+                    else:
+                        print(f"[{sym}] rate limited — waiting {wait}s...")
+                        time.sleep(wait)
                 else:
                     print(f"[{sym}] error: {e!r}")
 
@@ -630,34 +947,44 @@ def main():
     df = pd.DataFrame([asdict(r) for r in rows])
     df = df.sort_values("ann_rtn", ascending=False).reset_index(drop=True)
 
+    def _fmt_ratings(col_rating: pd.Series, col_num: pd.Series) -> pd.Series:
+        abbrev = col_rating.map(_RATING_ABBREV).fillna(col_rating)
+        has_n  = col_num > 0
+        return abbrev.where(~has_n, abbrev + " (" + col_num.astype(str) + ")")
+
     display_map = {
-        "symbol":       "Symbol",
-        "score":        "Score",
-        "price":        "Price~",
-        "exp_date":     "Exp Date",
-        "dte":          "DTE",
-        "strike":       "Strike",
-        "moneyness":    "Mness%",
-        "exp_move_pct": "EM%",
-        "vs_em":        "vs EM%",
-        "bid":          "Bid",
-        "ask":          "Ask",
-        "spread":       "Spread",
-        "volume":       "Vol",
-        "be_bid":       "BE(Bid)",
-        "pct_be_bid":   "%BE",
-        "open_int":     "OI",
-        "iv_rank":      "IVR",
-        "iv":           "IV%",
-        "delta":        "Delta",
-        "theta":        "θ/day",
-        "ret":          "Ret%",
-        "ann_rtn":      "AnnRtn%",
-        "profit_prob":  "PProb%",
-        "ma200_pct":    "MA200%",
+        "symbol":          "Symbol",
+        "score":           "Score",
+        "price":           "Price~",
+        "analyst_rating":  "Rating",
+        "analyst_target":  "Target",
+        "analyst_upside":  "Upside%",
+        "exp_date":        "Exp Date",
+        "dte":             "DTE",
+        "strike":          "Strike",
+        "moneyness":       "Mness%",
+        "exp_move_pct":    "EM%",
+        "vs_em":           "vs EM%",
+        "bid":             "Bid",
+        "ask":             "Ask",
+        "spread":          "Spread",
+        "volume":          "Vol",
+        "be_bid":          "BE(Bid)",
+        "pct_be_bid":      "%BE",
+        "open_int":        "OI",
+        "iv_rank":         "IVR",
+        "iv":              "IV%",
+        "hv30":            "HV30%",
+        "delta":           "Delta",
+        "theta":           "θ/day",
+        "ret":             "Ret%",
+        "ann_rtn":         "AnnRtn%",
+        "profit_prob":     "PProb%",
+        "ma200_pct":       "MA200%",
     }
 
     disp = df[list(display_map)].rename(columns=display_map).copy()
+    disp["Rating"] = _fmt_ratings(df["analyst_rating"], df["analyst_num"])
     disp.loc[df["earnings_date"].ne(""), "Symbol"] += " [!]"
 
     pd.set_option("display.width", 320)
@@ -676,16 +1003,52 @@ def main():
             print(f"    {r['symbol']:<6}  earnings={r['earnings_date']}  exp={r['exp_date']}  "
                   f"strike={r['strike']:>8.2f}  delta={r['delta']:>6.3f}  ann_rtn={r['ann_rtn']:>5.1f}%")
 
-    # High-IV-rank highlights (no earnings risk)
-    high_iv = df[(df["iv_rank"] >= 50) & df["earnings_date"].eq("")].head(20)
-    if not high_iv.empty:
-        cols = ["symbol", "price", "exp_date", "strike", "exp_move_pct", "vs_em", "bid", "ask", "spread", "volume", "iv_rank", "iv", "ann_rtn", "theta", "profit_prob"]
-        hdrs = ["Symbol", "Price~", "Exp Date", "Strike", "EM%", "vs EM%", "Bid", "Ask", "Spread", "Vol", "IVR", "IV%", "AnnRtn%", "θ/day", "PProb%"]
-        print(f"\n--- HIGH IV RANK (>=50, no earnings risk) ---")
-        print(high_iv[cols].rename(columns=dict(zip(cols, hdrs))).to_string(index=False))
+    iv_cols = ["symbol", "price", "analyst_rating", "analyst_target", "analyst_upside",
+               "exp_date", "strike", "exp_move_pct", "vs_em", "bid", "ask", "spread",
+               "volume", "iv_rank", "iv", "hv30", "ann_rtn", "theta", "profit_prob"]
+    iv_hdrs = ["Symbol", "Price~", "Rating", "Target", "Upside%",
+               "Exp Date", "Strike", "EM%", "vs EM%", "Bid", "Ask", "Spread",
+               "Vol", "IVR", "IV%", "HV30%", "AnnRtn%", "θ/day", "PProb%"]
+
+    def _iv_section(subset: pd.DataFrame, title: str) -> None:
+        if subset.empty:
+            return
+        t = subset[iv_cols].rename(columns=dict(zip(iv_cols, iv_hdrs))).copy()
+        t["Rating"] = _fmt_ratings(subset["analyst_rating"], subset["analyst_num"])
+        print(f"\n--- {title} ---")
+        print(t.to_string(index=False))
+
+    no_earn   = df["earnings_date"].eq("")
+    high_ivr  = df["iv_rank"] >= 50
+    iv_gt_hv  = df["iv"] > df["hv30"]
+
+    _iv_section(df[ high_ivr & ~iv_gt_hv & no_earn].head(20),
+                "HIGH IVR (>=50) only  — options elevated vs own history")
+    _iv_section(df[~high_ivr &  iv_gt_hv & no_earn].head(20),
+                "IV > HV30 only  — options priced above realized vol")
+    _iv_section(df[ high_ivr &  iv_gt_hv & no_earn].head(20),
+                "HIGH IVR + IV > HV30  — best premium candidates")
 
     df.to_csv(CSV_OUT, index=False)
     print(f"\nSaved {len(df)} results to {CSV_OUT}")
+
+    top_rows = sorted(rows, key=lambda r: r.score, reverse=True)[:AI_TOP_N]
+    ai_text  = ai_analysis(top_rows)
+    if ai_text:
+        print(f"\n{'='*60}")
+        print(f"AI ANALYSIS (top {len(top_rows)} by score)")
+        print('='*60)
+        print(ai_text)
+
+    config_str = (f"Universe: {UNIVERSE}  |  Profile: {RISK_PROFILE}  |  "
+                  f"DTE: {DTE_MIN}-{DTE_MAX}  |  |Δ|: {DELTA_MIN}-{DELTA_MAX}  |  "
+                  f"strike≤{MAX_STRIKE}  |  vol≥{MIN_VOLUME}  |  spread≤{MAX_SPREAD_PCT:.0%}")
+    write_html(df, config_str, failed, ai_text=ai_text)
+
+    if failed:
+        print(f"\n[!] {len(failed)} tickers skipped due to rate limiting:")
+        print("    " + ", ".join(failed))
+        print(f"    Re-run with UNIVERSE = {failed!r} to retry them.")
 
 
 if __name__ == "__main__":

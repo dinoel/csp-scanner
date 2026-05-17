@@ -27,6 +27,7 @@ _TTL: dict[str, int] = {
     "russell2000": 86400,  # 24 h
     "history":     86400,  # 24 h — daily bars, one fetch per day is enough
     "calendar":    86400,  # 24 h — earnings dates don't move hourly
+    "analyst":     86400,  # 24 h — ratings and price targets rarely change intraday
     "fast_info":   7200,   # 2 h
     "options":     7200,   # 2 h
 }
