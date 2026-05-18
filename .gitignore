@@ -3,6 +3,8 @@ yf_cache*.db
 
 # Scan results
 *.csv
+*.html
+results/
 
 # Python
 .venv/

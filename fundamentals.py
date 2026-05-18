@@ -53,6 +53,8 @@ class FundamentalsClient:
 
     def _get(self, path: str, **params) -> dict:
         resp = self._session.get(f"{_BASE}{path}", params=params, timeout=15)
+        if resp.status_code == 404:
+            return {}   # no data for this ticker — not an error
         resp.raise_for_status()
         return resp.json()
 

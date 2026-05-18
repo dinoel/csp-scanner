@@ -52,10 +52,25 @@ tbody tr:hover td{filter:brightness(1.5)}
 .fv{display:inline-block}
 .fv a{color:inherit;text-decoration:none}
 .fv a:hover{text-decoration:underline}
+.nav{margin-bottom:14px;padding:6px 0;border-bottom:1px solid #21262d;font-size:11px}
+.nav a{color:#58a6ff;text-decoration:none;margin:0 4px}
+.nav a:hover{text-decoration:underline}
+.nav .sep{color:#30363d;margin:0 2px}
+.nav .cur{color:#e6edf3;font-weight:700;margin:0 4px}
+.idx-table{margin-top:8px}
+.idx-table td a{color:#58a6ff;text-decoration:none}
+.idx-table td a:hover{text-decoration:underline}
 #fv-pop{display:none;position:fixed;z-index:9999;
         background:#161b22;border:1px solid #30363d;border-radius:6px;
         padding:6px;box-shadow:0 12px 32px #000a;pointer-events:none}
 #fv-pop img{display:block;width:440px;height:255px;border-radius:3px}
+.col-toggles{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));
+             gap:2px 12px;margin:4px 0 6px;padding:8px 10px;background:#0f1419;
+             border:1px solid #21262d;border-radius:4px;font-size:11px}
+.col-toggles label{display:flex;align-items:center;gap:6px;cursor:help;color:#c9d1d9;
+                   padding:2px 4px;border-radius:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.col-toggles label:hover{background:#161b22;color:#58a6ff}
+.col-toggles input{cursor:pointer;margin:0;accent-color:#58a6ff;flex-shrink:0}
 """
 
 _JS = """\
@@ -73,6 +88,32 @@ document.querySelectorAll('table[id]').forEach(t=>{
         const d=(!isNaN(an)&&!isNaN(bn))?an-bn:String(av).localeCompare(String(bv));
         return a*d;
       }).forEach(r=>tb.append(r));
+    });
+  });
+});
+document.querySelectorAll('.col-toggles').forEach(tb=>{
+  const tid=tb.dataset.target;
+  const tbl=document.getElementById(tid);
+  if(!tbl)return;
+  const key='cols:'+tid;
+  let saved={};
+  try{saved=JSON.parse(localStorage.getItem(key)||'{}');}catch(e){}
+  const apply=(col,show)=>{
+    tbl.querySelectorAll('[data-col="'+col+'"]').forEach(c=>{
+      c.style.display=show?'':'none';
+    });
+  };
+  tb.querySelectorAll('input').forEach(cb=>{
+    const col=cb.dataset.col;
+    if(col in saved){
+      const show=!!saved[col];
+      cb.checked=show;
+      apply(col,show);
+    }
+    cb.addEventListener('change',()=>{
+      apply(col,cb.checked);
+      saved[col]=cb.checked?1:0;
+      localStorage.setItem(key,JSON.stringify(saved));
     });
   });
 });
@@ -123,6 +164,45 @@ IV_H = ["Symbol","Price~","Rating","Target","Upside%",
         "Exp Date","Strike","EM%","vs EM%","Bid","Ask","Spread",
         "Vol","IVR","IV%","HV30%","AnnRtn%","θ/day","PProb%"]
 
+COL_DESC = {
+    "symbol":            "Ticker — click for Finviz, hover for chart",
+    "score":             "Composite ranking score (probability, return, EM buffer, MA200, fundamentals)",
+    "price":             "Underlying spot price (15-20 min delayed)",
+    "analyst_rating":    "Mean analyst recommendation (BUY / HOLD / SELL) with N analysts",
+    "analyst_target":    "Mean analyst 12-month price target",
+    "analyst_upside":    "% upside from spot to analyst target",
+    "fundamental_score": "0–100 score from EPS beat rate, revenue growth, FCF margin, debt/equity (financialdatasets.ai)",
+    "rev_growth":        "Year-over-year revenue growth %",
+    "eps_beat_rate":     "% of last 8 quarters where EPS beat estimate",
+    "fcf_margin":        "Free cash flow / revenue %",
+    "bull_pct":          "StockTwits bullish sentiment % (≥60 bullish, ≤40 bearish)",
+    "rsi":               "14-day Wilder RSI; ≥70 overbought, ≤30 oversold",
+    "pcr":               "Put/Call ratio from option chain volume; ≥1.5 bearish, ≤0.5 bullish",
+    "rr_25d_pct":        "25-delta Risk Reversal % — put skew vs calls; high = puts expensive (fear)",
+    "exp_date":          "Option expiration date",
+    "dte":               "Days to expiration",
+    "strike":            "Put strike price",
+    "moneyness":         "(strike − spot) / spot %  — negative = OTM put",
+    "exp_move_pct":      "Expected move % until expiry (from ATM straddle)",
+    "vs_em":             "Strike distance vs expected move (>100% = strike beyond 1σ implied move)",
+    "bid":               "Option bid price",
+    "ask":               "Option ask price",
+    "spread":            "Bid-ask spread (absolute $)",
+    "volume":            "Today's option contract volume",
+    "be_bid":            "Break-even price using bid (strike − bid)",
+    "pct_be_bid":        "% spot is above break-even (cushion)",
+    "open_int":          "Open interest (outstanding contracts)",
+    "iv_rank":           "IV Rank 0–100: where current IV sits in 52-week range",
+    "iv":                "Implied volatility % (annualized)",
+    "hv30":              "30-day historical (realized) volatility %",
+    "delta":             "Option delta (≈ probability of finishing ITM)",
+    "theta":             "Theta — $ premium decay per day",
+    "ret":               "One-period return: premium / (strike × 100)",
+    "ann_rtn":           "Annualized return %",
+    "profit_prob":       "Probability of expiring OTM (Black-Scholes)",
+    "ma200_pct":         "% spot is above/below 200-day moving average",
+}
+
 
 def _score_bg(score: float, lo: float, hi: float) -> str:
     """Row background: dark → green by normalized score."""
@@ -133,15 +213,43 @@ def _score_bg(score: float, lo: float, hi: float) -> str:
     return f"rgb({int(17+t*4)},{int(24+t*104)},{int(39+t*22)})"
 
 
+def _col_toolbar(fields: list, headers: list, table_id: str,
+                 visible: set[str]) -> str:
+    """Render checkbox grid that toggles column visibility for a table."""
+    parts = [f'<div class="col-toggles" data-target="{table_id}">']
+    for f, h in zip(fields, headers):
+        desc  = _he.escape(COL_DESC.get(f, ""))
+        label = _he.escape(h)
+        chk   = " checked" if f in visible else ""
+        parts.append(
+            f'<label title="{desc}">'
+            f'<input type="checkbox" data-col="{f}"{chk}>{label}</label>'
+        )
+    parts.append('</div>')
+    return "".join(parts)
+
+
 def _html_table(subset: pd.DataFrame, fields: list, headers: list,
-                table_id: str, s_lo: float, s_hi: float) -> str:
-    """Return a sortable HTML <table> string for the given DataFrame subset."""
+                table_id: str, s_lo: float, s_hi: float,
+                default_visible: list | None = None) -> str:
+    """Return a column-toolbar + sortable HTML <table> string.
+
+    default_visible: list of fields shown initially (others hidden but toggleable).
+    None = all fields visible.
+    """
     if subset.empty:
         return '<p class="empty">No results in this category.</p>'
 
+    visible = set(fields if default_visible is None else default_visible)
+    toolbar = _col_toolbar(fields, headers, table_id, visible)
     head = ("<thead><tr>"
-            + "".join(f"<th>{_he.escape(h)}</th>" for h in headers)
+            + "".join(
+                f'<th data-col="{f}"'
+                + ('' if f in visible else ' style="display:none"')
+                + f'>{_he.escape(h)}</th>'
+                for f, h in zip(fields, headers))
             + "</tr></thead>")
+    _hide = lambda f: '' if f in visible else ' style="display:none"'
     rows = []
     for rec in subset.to_dict("records"):
         is_earn = bool(rec.get("earnings_date", ""))
@@ -150,7 +258,7 @@ def _html_table(subset: pd.DataFrame, fields: list, headers: list,
         for f in fields:
             v = rec.get(f)
             if v is None or (isinstance(v, float) and math.isnan(v)):
-                cells.append('<td data-v="-9999">—</td>')
+                cells.append(f'<td data-col="{f}"{_hide(f)} data-v="-9999">—</td>')
             elif f == "symbol":
                 raw = str(v).replace(" [!]", "")
                 s   = _he.escape(raw)
@@ -169,53 +277,55 @@ def _html_table(subset: pd.DataFrame, fields: list, headers: list,
                 disp = _he.escape(f"{abbr} ({n})" if abbr and n > 0 else abbr or "—")
                 cls  = RATING_CLASS.get(raw, "")
                 ca   = f' class="{cls}"' if cls else ""
-                cells.append(f'<td data-v="{_he.escape(raw)}"{ca}>{disp}</td>')
+                cells.append(f'<td data-col="{f}"{_hide(f)} data-v="{_he.escape(raw)}"{ca}>{disp}</td>')
             elif f == "bull_pct":
                 if v is None or (isinstance(v, float) and math.isnan(v)):
-                    cells.append('<td data-v="-9999">—</td>')
+                    cells.append(f'<td data-col="{f}"{_hide(f)} data-v="-9999">—</td>')
                 else:
                     pct = float(v)
                     cls = "s-bull" if pct >= 60 else ("s-bear" if pct <= 40 else "s-neu")
-                    cells.append(f'<td data-v="{pct}" class="{cls}">{pct}%</td>')
+                    cells.append(f'<td data-col="{f}"{_hide(f)} data-v="{pct}" class="{cls}">{pct}%</td>')
             elif f == "rsi":
                 if v is None or (isinstance(v, float) and math.isnan(v)):
-                    cells.append('<td data-v="-9999">—</td>')
+                    cells.append(f'<td data-col="{f}"{_hide(f)} data-v="-9999">—</td>')
                 else:
                     r = float(v)
                     cls = "rsi-ob" if r >= 70 else ("rsi-os" if r <= 30 else "")
                     ca  = f' class="{cls}"' if cls else ""
-                    cells.append(f'<td data-v="{r}"{ca}>{r}</td>')
+                    cells.append(f'<td data-col="{f}"{_hide(f)} data-v="{r}"{ca}>{r}</td>')
             elif f == "pcr":
                 if v is None or (isinstance(v, float) and math.isnan(v)):
-                    cells.append('<td data-v="-9999">—</td>')
+                    cells.append(f'<td data-col="{f}"{_hide(f)} data-v="-9999">—</td>')
                 else:
                     r = float(v)
                     cls = "pcr-hi" if r >= 1.5 else ("pcr-lo" if r <= 0.5 else "")
                     ca  = f' class="{cls}"' if cls else ""
-                    cells.append(f'<td data-v="{r}"{ca}>{r}</td>')
+                    cells.append(f'<td data-col="{f}"{_hide(f)} data-v="{r}"{ca}>{r}</td>')
             elif f == "rr_25d_pct":
                 if v is None or (isinstance(v, float) and math.isnan(v)):
-                    cells.append('<td data-v="-9999">—</td>')
+                    cells.append(f'<td data-col="{f}"{_hide(f)} data-v="-9999">—</td>')
                 else:
                     r = float(v)
                     cls = "skew-steep" if r >= 15 else ("skew-inv" if r < 0 else "")
                     ca  = f' class="{cls}"' if cls else ""
-                    cells.append(f'<td data-v="{r}"{ca}>{r}%</td>')
+                    cells.append(f'<td data-col="{f}"{_hide(f)} data-v="{r}"{ca}>{r}%</td>')
             elif isinstance(v, int):
-                cells.append(f'<td data-v="{v}">{v:,}</td>')
+                cells.append(f'<td data-col="{f}"{_hide(f)} data-v="{v}">{v:,}</td>')
             elif isinstance(v, float):
-                cells.append(f'<td data-v="{v}">{v}</td>')
+                cells.append(f'<td data-col="{f}"{_hide(f)} data-v="{v}">{v}</td>')
             else:
-                cells.append(f'<td data-v="-9999">{_he.escape(str(v))}</td>')
+                cells.append(f'<td data-col="{f}"{_hide(f)} data-v="-9999">{_he.escape(str(v))}</td>')
         rows.append(f'<tr style="background:{bg}">{"".join(cells)}</tr>')
 
     body = "<tbody>" + "".join(rows) + "</tbody>"
-    return f'<div class="wrap"><table id="{table_id}">{head}{body}</table></div>'
+    return (toolbar
+            + f'<div class="wrap"><table id="{table_id}">{head}{body}</table></div>')
 
 
 def write_html(df: pd.DataFrame, config_str: str, failed: list,
                ai_text: str | None = None, ai_top_n: int = 10,
-               html_out: str = "csp_scan.html") -> None:
+               html_out: str = "csp_scan.html",
+               nav_html: str = "") -> None:
     """Write all scanner results to a self-contained dark-themed sortable HTML page."""
     scores = df["score"].dropna()
     s_lo, s_hi = float(scores.min()), float(scores.max())
@@ -225,6 +335,7 @@ def write_html(df: pd.DataFrame, config_str: str, failed: list,
     iv_gt_hv = df["iv"] > df["hv30"]
 
     parts: list[str] = [
+        nav_html,
         f'<h1>Short Put Scanner</h1>'
         f'<p class="meta">{_he.escape(config_str)}'
         f'<br>Generated {datetime.datetime.now().strftime("%Y-%m-%d %H:%M")}</p>'
@@ -256,7 +367,8 @@ def write_html(df: pd.DataFrame, config_str: str, failed: list,
     ]:
         parts.append(f"<h2>{_he.escape(title)}</h2>")
         parts.append(_html_table(df[mask].sort_values("score", ascending=False),
-                                 IV_F, IV_H, tid, s_lo, s_hi))
+                                 MAIN_F, MAIN_H, tid, s_lo, s_hi,
+                                 default_visible=IV_F))
 
     if failed:
         fs = ", ".join(_he.escape(s) for s in failed)

@@ -16,13 +16,16 @@ todo: filter based on volume/spread , use mid price instead of bid
 
 from __future__ import annotations
 
+import html as _he
 import io
+import json
 import math
 import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -48,10 +51,14 @@ RISK_FREE_RATE = 0.05
 MIN_BID = 0.05
 COMPUTE_IV_RANK = True
 MAX_WORKERS = 6      # parallel ticker scans; keep ≤8 to avoid Yahoo rate limits
-CSV_OUT  = "csp_scan.csv"
-HTML_OUT = "csp_scan.html"
+RESULTS_DIR = "results"
+HTML_OUT_TEMPLATE = "csp_scan_{profile}.html"
+#PROFILES_TO_RUN = ["low", "medium", "high"]
+PROFILES_TO_RUN = ["medium"]
+DEFAULT_PROFILE = "medium"  # which profile the index links to by default
 ENABLE_AI_ANALYSIS = False
 AI_TOP_N = 10
+AI_BATCH_SIZE = 10   # hard cap per batch; prompts before fetching the next batch
 AI_MODEL = "claude-opus-4-7"
 DATA_PROVIDER = "yfinance"  # "yfinance" | "massive" (set MASSIVE_API_KEY env var)
 ENABLE_FUNDAMENTALS = False  # requires FINANCIALDATASETS_API_KEY env var
@@ -470,6 +477,83 @@ def scan_ticker(symbol: str) -> Optional[PutRow]:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+def _profile_nav_html(current: str) -> str:
+    parts = ['<div class="nav">',
+             '<a href="../index.html">&larr; All scans</a>',
+             '<span class="sep">|</span>']
+    for i, p in enumerate(PROFILES_TO_RUN):
+        if i:
+            parts.append('<span class="sep">·</span>')
+        if p == current:
+            parts.append(f'<span class="cur">{p}</span>')
+        else:
+            parts.append(f'<a href="{HTML_OUT_TEMPLATE.format(profile=p)}">{p}</a>')
+    parts.append('</div>')
+    return ''.join(parts)
+
+
+def _build_index_html(results_root: Path) -> None:
+    from report import _CSS
+    entries: list[tuple[str, dict]] = []
+    for d in sorted(results_root.iterdir(), reverse=True):
+        if not d.is_dir():
+            continue
+        meta_file = d / "meta.json"
+        if not meta_file.exists():
+            continue
+        try:
+            meta = json.loads(meta_file.read_text())
+        except Exception:
+            continue
+        entries.append((d.name, meta))
+
+    head_cells = (
+        "<th>Scan Time</th><th>Universe</th>"
+        "<th>Candidates</th><th>Profiles</th>"
+    )
+    body_rows: list[str] = []
+    for folder, m in entries:
+        counts = m.get("counts", {})
+        cnts_str = "  ".join(
+            f"{p}={counts.get(p, '-')}"
+            for p in PROFILES_TO_RUN
+        )
+        default_link = f"{folder}/{HTML_OUT_TEMPLATE.format(profile=DEFAULT_PROFILE)}"
+        profile_links = " · ".join(
+            f'<a href="{folder}/{HTML_OUT_TEMPLATE.format(profile=p)}">{p}</a>'
+            for p in PROFILES_TO_RUN
+        )
+        body_rows.append(
+            f'<tr>'
+            f'<td><a href="{default_link}">{_he.escape(m.get("timestamp", folder))}</a></td>'
+            f'<td>{_he.escape(str(m.get("universe", "?")))}</td>'
+            f'<td>{_he.escape(cnts_str)}</td>'
+            f'<td>{profile_links}</td>'
+            f'</tr>'
+        )
+
+    if not body_rows:
+        body_rows.append('<tr><td colspan="4" class="empty">No scans yet.</td></tr>')
+
+    page = (
+        "<!DOCTYPE html><html lang='en'><head>"
+        "<meta charset='UTF-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>CSP Scanner — Scan History</title>"
+        f"<style>{_CSS}</style>"
+        "</head><body>"
+        "<h1>Short Put Scanner — Scan History</h1>"
+        f'<p class="meta">Default link opens the <b>{DEFAULT_PROFILE}</b>-risk report.</p>'
+        '<div class="wrap idx-table"><table>'
+        f'<thead><tr>{head_cells}</tr></thead>'
+        f'<tbody>{"".join(body_rows)}</tbody>'
+        '</table></div>'
+        "</body></html>"
+    )
+    (results_root / "index.html").write_text(page, encoding="utf-8")
+    print(f"Updated index → {results_root / 'index.html'}")
+
+
 def main():
     from cache import DB_PATH
     stats = CACHE.stats()
@@ -482,6 +566,33 @@ def main():
         random.sample(all_tickers, min(SAMPLE_SIZE, len(all_tickers)))
         if SAMPLE_SIZE else all_tickers
     )
+
+    results_root = Path(RESULTS_DIR)
+    scan_ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    scan_dir = results_root / scan_ts
+    scan_dir.mkdir(parents=True, exist_ok=True)
+
+    counts: dict[str, int] = {}
+    for profile_name in PROFILES_TO_RUN:
+        globals().update(_PROFILES[profile_name])
+        globals()["RISK_PROFILE"] = profile_name
+        html_out = str(scan_dir / HTML_OUT_TEMPLATE.format(profile=profile_name))
+        nav_html = _profile_nav_html(profile_name)
+        print(f"\n{'#'*70}")
+        print(f"#  PROFILE: {profile_name.upper()}  →  {html_out}")
+        print(f"{'#'*70}")
+        counts[profile_name] = _run_profile(tickers, html_out, nav_html)
+
+    meta = {
+        "timestamp": scan_ts,
+        "universe": str(UNIVERSE),
+        "counts": counts,
+    }
+    (scan_dir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    _build_index_html(results_root)
+
+
+def _run_profile(tickers: list[str], html_out: str, nav_html: str = "") -> int:
     print(f"Scanning {len(tickers)} tickers  |  profile={RISK_PROFILE.upper()}  "
           f"|  DTE {DTE_MIN}-{DTE_MAX}  |  |Δ| {DELTA_MIN}-{DELTA_MAX}  "
           f"|  strike≤{MAX_STRIKE}  |  vol≥{MIN_VOLUME}  spread≤{MAX_SPREAD_PCT:.0%}\n")
@@ -515,7 +626,7 @@ def main():
 
     if not rows:
         print("No results.")
-        return
+        return 0
 
     df = pd.DataFrame([asdict(r) for r in rows])
     df = df.sort_values("ann_rtn", ascending=False).reset_index(drop=True)
@@ -609,45 +720,62 @@ def main():
     _iv_section(df[ high_ivr &  iv_gt_hv & no_earn].head(20),
                 "HIGH IVR + IV > HV30  — best premium candidates")
 
-    df.to_csv(CSV_OUT, index=False)
-    print(f"\nSaved {len(df)} results to {CSV_OUT}")
-
     top_rows = sorted(rows, key=lambda r: r.score, reverse=True)[:AI_TOP_N]
 
     fund_raw: dict[str, dict] = {}
-    print(f"\nFetching sentiment + fundamentals for top {len(top_rows)} candidates...")
-    for r in top_rows:
-        # StockTwits sentiment (always, no key needed)
-        sent = CACHE.fetch(f"sentiment:{r.symbol}",
-                           lambda s=r.symbol: _sentiment.fetch_sentiment(s))
-        r.bull_pct = sent.get("bull_pct", float("nan"))
-        df.loc[df["symbol"] == r.symbol, "bull_pct"] = r.bull_pct
+    processed: list = []
+    print(f"\nFetching sentiment + fundamentals for top {len(top_rows)} "
+          f"(batch size {AI_BATCH_SIZE})...")
+    for batch_start in range(0, len(top_rows), AI_BATCH_SIZE):
+        batch = top_rows[batch_start : batch_start + AI_BATCH_SIZE]
+        if batch_start > 0:
+            remaining = len(top_rows) - batch_start
+            ans = input(f"  Processed {batch_start}. Fetch next "
+                        f"{min(AI_BATCH_SIZE, remaining)}? [y/N]: ").strip().lower()
+            if ans != "y":
+                print(f"  Stopping at {batch_start} candidates.")
+                break
 
-        # Fundamentals (only when API key is configured)
-        if ENABLE_FUNDAMENTALS and _fund.CLIENT:
-            fm = _fund.fetch_and_compute(r.symbol, CACHE)
-            r.fundamental_score = fm.score
-            r.rev_growth        = fm.rev_growth_pct
-            r.eps_beat_rate     = fm.eps_beat_rate
-            r.fcf_margin        = fm.fcf_margin_pct
-            mask = df["symbol"] == r.symbol
-            df.loc[mask, "fundamental_score"] = fm.score
-            df.loc[mask, "rev_growth"]        = fm.rev_growth_pct
-            df.loc[mask, "eps_beat_rate"]     = fm.eps_beat_rate
-            df.loc[mask, "fcf_margin"]        = fm.fcf_margin_pct
-            sym = r.symbol
-            news = CACHE.fetch(f"fd_news:{sym}", lambda s=sym: _fund.CLIENT.fetch_news(s))
-            fund_raw[sym] = {
-                "income":   CACHE.get(f"fd_income:{sym}")   or [],
-                "cashflow": CACHE.get(f"fd_cashflow:{sym}") or [],
-                "balance":  CACHE.get(f"fd_balance:{sym}")  or [],
-                "earnings": CACHE.get(f"fd_earnings:{sym}") or [],
-                "news":     news,
-            }
+        for r in batch:
+            sent = CACHE.fetch(f"sentiment:{r.symbol}",
+                               lambda s=r.symbol: _sentiment.fetch_sentiment(s))
+            r.bull_pct = sent.get("bull_pct", float("nan"))
+            df.loc[df["symbol"] == r.symbol, "bull_pct"] = r.bull_pct
+
+            if ENABLE_FUNDAMENTALS and _fund.CLIENT:
+                fm = _fund.fetch_and_compute(r.symbol, CACHE)
+                r.fundamental_score = fm.score
+                r.rev_growth        = fm.rev_growth_pct
+                r.eps_beat_rate     = fm.eps_beat_rate
+                r.fcf_margin        = fm.fcf_margin_pct
+                mask = df["symbol"] == r.symbol
+                df.loc[mask, "fundamental_score"] = fm.score
+                df.loc[mask, "rev_growth"]        = fm.rev_growth_pct
+                df.loc[mask, "eps_beat_rate"]     = fm.eps_beat_rate
+                df.loc[mask, "fcf_margin"]        = fm.fcf_margin_pct
+                sym = r.symbol
+                news = CACHE.fetch(f"fd_news:{sym}", lambda s=sym: _fund.CLIENT.fetch_news(s))
+                fund_raw[sym] = {
+                    "income":   CACHE.get(f"fd_income:{sym}")   or [],
+                    "cashflow": CACHE.get(f"fd_cashflow:{sym}") or [],
+                    "balance":  CACHE.get(f"fd_balance:{sym}")  or [],
+                    "earnings": CACHE.get(f"fd_earnings:{sym}") or [],
+                    "news":     news,
+                }
+            processed.append(r)
+
+    top_rows = processed
 
     ai_text = None
-    if ENABLE_AI_ANALYSIS:
-        ai_text = ai_analysis(top_rows, fund_raw, model=AI_MODEL)
+    if ENABLE_AI_ANALYSIS and top_rows:
+        if len(top_rows) > AI_BATCH_SIZE:
+            ans = input(f"\nSend {len(top_rows)} candidates to {AI_MODEL}? [y/N]: ").strip().lower()
+            if ans != "y":
+                print("  Skipping AI analysis.")
+            else:
+                ai_text = ai_analysis(top_rows, fund_raw, model=AI_MODEL)
+        else:
+            ai_text = ai_analysis(top_rows, fund_raw, model=AI_MODEL)
     if ai_text:
         print(f"\n{'='*60}")
         print(f"AI ANALYSIS (top {len(top_rows)} by score)")
@@ -657,12 +785,15 @@ def main():
     config_str = (f"Universe: {UNIVERSE}  |  Profile: {RISK_PROFILE}  |  "
                   f"DTE: {DTE_MIN}-{DTE_MAX}  |  |Δ|: {DELTA_MIN}-{DELTA_MAX}  |  "
                   f"strike≤{MAX_STRIKE}  |  vol≥{MIN_VOLUME}  |  spread≤{MAX_SPREAD_PCT:.0%}")
-    write_html(df, config_str, failed, ai_text=ai_text, ai_top_n=AI_TOP_N, html_out=HTML_OUT)
+    write_html(df, config_str, failed, ai_text=ai_text, ai_top_n=AI_TOP_N,
+               html_out=html_out, nav_html=nav_html)
 
     if failed:
         print(f"\n[!] {len(failed)} tickers skipped due to rate limiting:")
         print("    " + ", ".join(failed))
         print(f"    Re-run with UNIVERSE = {failed!r} to retry them.")
+
+    return len(df)
 
 
 if __name__ == "__main__":

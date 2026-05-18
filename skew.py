@@ -75,28 +75,40 @@ def compute_iv(S: float, K: float, T: float, r: float, price: float, is_put: boo
 
 # ── Chain helpers ─────────────────────────────────────────────────────────────
 
-def _mid_price(row) -> float:
-    """Mid price if bid/ask live, else last price, else NaN. No liquidity filters."""
+def _quote_price(row, side: str = "mid") -> float:
+    """Quote price for a chain row.
+
+    side="mid"  → (bid+ask)/2
+    side="bid"  → bid (conservative for a seller: what you'd actually receive)
+    side="ask"  → ask (conservative for a buyer: what you'd actually pay)
+    Falls back to mid if the requested side is missing, then to lastPrice.
+    """
     bid  = float(row.get("bid")       or 0)
     ask  = float(row.get("ask")       or 0)
     last = float(row.get("lastPrice") or 0)
+    if side == "bid" and bid > 0:
+        return bid
+    if side == "ask" and ask > 0:
+        return ask
     if bid > 0 and ask > 0:
         return (bid + ask) / 2
     return last if last > 0 else _NAN
 
 
 def find_at_delta(df: pd.DataFrame, spot: float, T: float, r: float,
-                  target_delta: float, is_put: bool) -> tuple:
+                  target_delta: float, is_put: bool,
+                  price_side: str = "mid") -> tuple:
     """Return (strike, iv, bid, ask, last) of option whose |delta| ≈ target_delta.
 
     target_delta should be positive (e.g. 0.25 for 25-delta).
+    price_side: which quote to feed into IV — see _quote_price.
     """
     best = (None, _NAN, _NAN, _NAN, _NAN)
     best_dist = float("inf")
     target_signed = -target_delta if is_put else target_delta
 
     for row in df.to_dict("records"):
-        price = _mid_price(row)
+        price = _quote_price(row, price_side)
         if math.isnan(price):
             continue
         iv = compute_iv(spot, row["strike"], T, r, price, is_put)
@@ -114,10 +126,10 @@ def find_at_delta(df: pd.DataFrame, spot: float, T: float, r: float,
 
 
 def find_atm_iv(calls: pd.DataFrame, spot: float, T: float, r: float) -> float:
-    """ATM IV from the call closest to spot."""
+    """ATM IV from the call closest to spot (always mid — used as normalizer)."""
     best_iv, best_dist = _NAN, float("inf")
     for row in calls.to_dict("records"):
-        price = _mid_price(row)
+        price = _quote_price(row, "mid")
         if math.isnan(price):
             continue
         iv = compute_iv(spot, row["strike"], T, r, price, is_put=False)
@@ -138,11 +150,15 @@ def compute_skew(calls: pd.DataFrame, puts: pd.DataFrame,
     if calls.empty or puts.empty:
         return EMPTY
 
+    # Conservative pricing for a put-seller's perspective:
+    #   put leg priced at BID (what you'd actually receive when selling)
+    #   call leg priced at ASK (what the buyer pays — fair comparison)
+    # This shrinks RR vs mid-mid, exposing how much of the apparent skew is just spread.
     atm_iv = find_atm_iv(calls, spot, T, r)
-    _, p25_iv, *_ = find_at_delta(puts,  spot, T, r, 0.25, True)
-    _, c25_iv, *_ = find_at_delta(calls, spot, T, r, 0.25, False)
-    _, p10_iv, *_ = find_at_delta(puts,  spot, T, r, 0.10, True)
-    _, c10_iv, *_ = find_at_delta(calls, spot, T, r, 0.10, False)
+    _, p25_iv, *_ = find_at_delta(puts,  spot, T, r, 0.25, True,  price_side="bid")
+    _, c25_iv, *_ = find_at_delta(calls, spot, T, r, 0.25, False, price_side="ask")
+    _, p10_iv, *_ = find_at_delta(puts,  spot, T, r, 0.10, True,  price_side="bid")
+    _, c10_iv, *_ = find_at_delta(calls, spot, T, r, 0.10, False, price_side="ask")
 
     if math.isnan(atm_iv) or math.isnan(p25_iv) or math.isnan(c25_iv):
         return SkewMetrics(atm_iv=atm_iv, rr_25d=_NAN, rr_25d_pct=_NAN, rr_10d=_NAN)
