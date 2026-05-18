@@ -30,6 +30,12 @@ _TTL: dict[str, int] = {
     "analyst":     86400,  # 24 h — ratings and price targets rarely change intraday
     "fast_info":   7200,   # 2 h
     "options":     7200,   # 2 h
+    "fd_income":   86400 * 3,  # 3 days — quarterly reports
+    "fd_cashflow": 86400 * 3,
+    "fd_balance":  86400 * 3,
+    "fd_earnings": 86400,      # 24 h — updates after each earnings report
+    "fd_news":     3600,       # 1 h  — news is time-sensitive
+    "sentiment":   3600,       # 1 h  — social sentiment changes intraday
 }
 _DEFAULT_TTL = 1200
 

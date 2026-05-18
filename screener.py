@@ -28,8 +28,8 @@ import yfinance as yf
 from yfinance.screener.query import EquityQuery
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
-MIN_PRICE      = 50       # $ — avoid sub-penny / micro-cap
-MAX_PRICE      = 200     # $ — matches csp_scanner MAX_STRIKE
+MIN_PRICE      = 60       # $ — avoid micro-cap / penny stocks
+MAX_PRICE      = 300     # $ — screener pre-filter; csp_scanner MAX_STRIKE filters strike, not spot
 MIN_AVG_VOLUME = 2500_000 # avg 3-month daily share volume (proxy for optionable)
 MIN_BETA       = 0.3     # exclude very low beta (dull stocks, thin options)
 MAX_BETA       = 4.0     # exclude very high beta (too volatile for CSP)
@@ -41,13 +41,15 @@ MAX_RESULTS    = 500     # max candidates returned (Yahoo limit per request ~250
 def _build_query() -> EquityQuery:
     """Build EquityQuery with numeric filters.
     MA200 check is done post-query since it's not a screener field."""
-    return EquityQuery("and", [
+    # type: ignore comments below suppress yfinance stub imprecision —
+    # EquityQuery operand types are correct at runtime but stubs are incomplete.
+    return EquityQuery("and", [          # type: ignore[arg-type]
         EquityQuery("is-in", ["region", "us"]),
-        EquityQuery("gt",    ["eodprice", MIN_PRICE]),
-        EquityQuery("lt",    ["eodprice", MAX_PRICE]),
-        EquityQuery("gt",    ["avgdailyvol3m", MIN_AVG_VOLUME]),
-        EquityQuery("gt",    ["beta", MIN_BETA]),
-        EquityQuery("lt",    ["beta", MAX_BETA]),
+        EquityQuery("gt",    ["eodprice",     MIN_PRICE]),       # type: ignore[list-item]
+        EquityQuery("lt",    ["eodprice",     MAX_PRICE]),       # type: ignore[list-item]
+        EquityQuery("gt",    ["avgdailyvol3m", MIN_AVG_VOLUME]), # type: ignore[list-item]
+        EquityQuery("gt",    ["beta",         MIN_BETA]),        # type: ignore[list-item]
+        EquityQuery("lt",    ["beta",         MAX_BETA]),        # type: ignore[list-item]
     ])
 
 
