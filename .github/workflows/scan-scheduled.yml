@@ -21,6 +21,7 @@ jobs:
     env:
       ENABLE_AI_ANALYSIS: "false"
       ENABLE_FUNDAMENTALS: "false"
+      PYTHONUNBUFFERED: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4

@@ -54,8 +54,8 @@ COMPUTE_IV_RANK = True
 MAX_WORKERS = 6      # parallel ticker scans; keep ≤8 to avoid Yahoo rate limits
 RESULTS_DIR = "results"
 HTML_OUT_TEMPLATE = "csp_scan_{profile}.html"
-#PROFILES_TO_RUN = ["low", "medium", "high"]
-PROFILES_TO_RUN = ["medium"]
+PROFILES_TO_RUN = ["low", "medium", "high"]
+#PROFILES_TO_RUN = ["medium"]
 DEFAULT_PROFILE = "medium"  # which profile the index links to by default
 def _envbool(name: str, default: bool) -> bool:
     v = os.getenv(name)
