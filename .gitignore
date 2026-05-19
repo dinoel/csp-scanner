@@ -15,3 +15,6 @@ __pycache__/
 # IDE / tooling
 .vscode/
 .claude/
+
+# Cloudflare Wrangler local state
+.wrangler/
