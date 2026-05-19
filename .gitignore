@@ -1,9 +1,9 @@
 # Cache databases
 yf_cache*.db
 
-# Scan results
+# Scan results (generated; static/ assets are kept under version control)
 *.csv
-*.html
+csp_scan*.html
 results/
 
 # Python

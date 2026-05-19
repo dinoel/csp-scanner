@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Run CSP Scan</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#0d1117;color:#c9d1d9;font:14px/1.5 'Consolas','Courier New',monospace;
+       min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+  .card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:28px;
+        max-width:420px;width:100%;box-shadow:0 8px 32px #0008}
+  h1{color:#58a6ff;font-size:18px;margin-bottom:6px}
+  p.sub{color:#8b949e;font-size:12px;margin-bottom:18px}
+  label{display:block;font-size:11px;color:#8b949e;margin:14px 0 4px;text-transform:uppercase;letter-spacing:.05em}
+  input,select{width:100%;padding:8px 10px;background:#0d1117;border:1px solid #30363d;
+               border-radius:4px;color:#e6edf3;font:13px 'Consolas',monospace}
+  input:focus,select:focus{outline:none;border-color:#58a6ff}
+  button{width:100%;margin-top:18px;padding:10px;background:#238636;color:#fff;border:none;
+         border-radius:4px;font:600 13px 'Consolas',monospace;cursor:pointer;
+         text-transform:uppercase;letter-spacing:.05em}
+  button:hover{background:#2ea043}
+  button:disabled{background:#30363d;color:#8b949e;cursor:not-allowed}
+  .msg{margin-top:14px;padding:10px;border-radius:4px;font-size:12px;display:none}
+  .msg.ok{display:block;background:#0d2818;border:1px solid #238636;color:#56d364}
+  .msg.err{display:block;background:#2d0f12;border:1px solid #f85149;color:#f85149}
+  .link{display:block;margin-top:12px;text-align:center;color:#58a6ff;text-decoration:none;font-size:12px}
+  .link:hover{text-decoration:underline}
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>Run CSP Scan</h1>
+    <p class="sub">Triggers the on-demand workflow with AI + fundamentals enabled.</p>
+
+    <label for="workflow">Workflow</label>
+    <select id="workflow">
+      <option value="scan-ondemand.yml">scan-ondemand (with AI)</option>
+      <option value="scan-scheduled.yml">scan-scheduled (no AI)</option>
+    </select>
+
+    <label for="password">Password</label>
+    <input id="password" type="password" autocomplete="current-password" autofocus>
+
+    <button id="go">Trigger Scan</button>
+
+    <div id="msg" class="msg"></div>
+
+    <a class="link" href="./index.html">← Back to scan history</a>
+  </div>
+
+<script>
+// Paste your Worker URL here after `wrangler deploy`:
+const WORKER_URL = "https://csp-scanner-trigger.YOUR-SUBDOMAIN.workers.dev";
+
+const $ = id => document.getElementById(id);
+const msg = (text, kind) => {
+  const m = $("msg");
+  m.textContent = text;
+  m.className = "msg " + kind;
+};
+
+$("go").addEventListener("click", async () => {
+  const password = $("password").value.trim();
+  const workflow = $("workflow").value;
+  if (!password) { msg("Enter the password.", "err"); return; }
+
+  $("go").disabled = true;
+  msg("Triggering…", "ok");
+
+  try {
+    const res = await fetch(WORKER_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ password, workflow }),
+    });
+    const data = await res.json();
+    if (res.ok) {
+      msg(`✓ ${workflow} triggered. Check Actions tab in 30–60 sec; report appears here when done.`, "ok");
+      $("password").value = "";
+    } else {
+      msg(`✗ ${data.error || "unknown error"}`, "err");
+    }
+  } catch (e) {
+    msg(`✗ ${e.message}`, "err");
+  } finally {
+    $("go").disabled = false;
+  }
+});
+
+$("password").addEventListener("keydown", e => {
+  if (e.key === "Enter") $("go").click();
+});
+</script>
+</body>
+</html>

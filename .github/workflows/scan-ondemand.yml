@@ -53,6 +53,9 @@ jobs:
       - name: Run scanner
         run: python csp_scanner.py
 
+      - name: Copy static assets
+        run: mkdir -p results && cp -v static/* results/
+
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
