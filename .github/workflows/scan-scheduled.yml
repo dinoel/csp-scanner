@@ -1,0 +1,57 @@
+name: Scheduled Scan
+
+on:
+  schedule:
+    # 21:30 UTC = 16:30 ET (DST) — 30 min after US close. Mon–Fri.
+    - cron: '30 21 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    env:
+      ENABLE_AI_ANALYSIS: "false"
+      ENABLE_FUNDAMENTALS: "false"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Restore scanner state (cache + history)
+        uses: actions/cache@v4
+        with:
+          path: |
+            yf_cache_v2.db
+            results
+          key: scanner-state-${{ github.run_id }}
+          restore-keys: |
+            scanner-state-
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run scanner
+        run: python csp_scanner.py
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./results
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -20,6 +20,7 @@ import html as _he
 import io
 import json
 import math
+import os
 import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -56,12 +57,17 @@ HTML_OUT_TEMPLATE = "csp_scan_{profile}.html"
 #PROFILES_TO_RUN = ["low", "medium", "high"]
 PROFILES_TO_RUN = ["medium"]
 DEFAULT_PROFILE = "medium"  # which profile the index links to by default
-ENABLE_AI_ANALYSIS = False
+def _envbool(name: str, default: bool) -> bool:
+    v = os.getenv(name)
+    return default if v is None else v.strip().lower() in ("1", "true", "yes", "y")
+
+ENABLE_AI_ANALYSIS  = _envbool("ENABLE_AI_ANALYSIS",  False)
+ENABLE_FUNDAMENTALS = _envbool("ENABLE_FUNDAMENTALS", False)
+NON_INTERACTIVE     = bool(os.getenv("CI"))  # GitHub Actions sets CI=true
 AI_TOP_N = 10
 AI_BATCH_SIZE = 10   # hard cap per batch; prompts before fetching the next batch
 AI_MODEL = "claude-opus-4-7"
 DATA_PROVIDER = "yfinance"  # "yfinance" | "massive" (set MASSIVE_API_KEY env var)
-ENABLE_FUNDAMENTALS = False  # requires FINANCIALDATASETS_API_KEY env var
 MARKET_OPEN_GRACE_MIN = 30  # minutes after market open before requiring today's volume
 
 # ── Risk profiles ─────────────────────────────────────────────────────────────
@@ -728,7 +734,7 @@ def _run_profile(tickers: list[str], html_out: str, nav_html: str = "") -> int:
           f"(batch size {AI_BATCH_SIZE})...")
     for batch_start in range(0, len(top_rows), AI_BATCH_SIZE):
         batch = top_rows[batch_start : batch_start + AI_BATCH_SIZE]
-        if batch_start > 0:
+        if batch_start > 0 and not NON_INTERACTIVE:
             remaining = len(top_rows) - batch_start
             ans = input(f"  Processed {batch_start}. Fetch next "
                         f"{min(AI_BATCH_SIZE, remaining)}? [y/N]: ").strip().lower()
@@ -768,7 +774,7 @@ def _run_profile(tickers: list[str], html_out: str, nav_html: str = "") -> int:
 
     ai_text = None
     if ENABLE_AI_ANALYSIS and top_rows:
-        if len(top_rows) > AI_BATCH_SIZE:
+        if len(top_rows) > AI_BATCH_SIZE and not NON_INTERACTIVE:
             ans = input(f"\nSend {len(top_rows)} candidates to {AI_MODEL}? [y/N]: ").strip().lower()
             if ans != "y":
                 print("  Skipping AI analysis.")

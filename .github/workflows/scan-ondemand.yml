@@ -1,0 +1,62 @@
+name: On-Demand Scan (with AI)
+
+on:
+  workflow_dispatch:
+    inputs:
+      profiles:
+        description: 'Profiles to run (comma-separated): low,medium,high'
+        required: false
+        default: 'medium'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    env:
+      ENABLE_AI_ANALYSIS: "true"
+      ENABLE_FUNDAMENTALS: "true"
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      FINANCIALDATASETS_API_KEY: ${{ secrets.FINANCIALDATASETS_API_KEY }}
+      STOCKTWITS_TOKEN: ${{ secrets.STOCKTWITS_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Restore scanner state (cache + history)
+        uses: actions/cache@v4
+        with:
+          path: |
+            yf_cache_v2.db
+            results
+          key: scanner-state-${{ github.run_id }}
+          restore-keys: |
+            scanner-state-
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run scanner
+        run: python csp_scanner.py
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./results
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
