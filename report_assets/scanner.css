@@ -179,6 +179,12 @@ body { min-height: 100vh; }
   flex: 1;
   overflow: auto;
   position: relative;
+  contain: layout style;
+}
+.app { contain: layout; }
+table.scan tbody tr {
+  content-visibility: auto;
+  contain-intrinsic-size: 0 28px;
 }
 table.scan {
   border-collapse: separate;

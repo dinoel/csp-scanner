@@ -1,5 +1,5 @@
 /* Short Put Scanner — trader-grade UI (generated from Claude Design handoff) */
-const { useState, useMemo, useEffect, useRef, useLayoutEffect } = React;
+const { useState, useMemo, useEffect, useRef, useLayoutEffect, useCallback } = React;
 
 const TAB_META = [
   { id: "earnings", label: "Earnings risk", hint: "Earnings inside expiry window" },
@@ -349,6 +349,19 @@ function pickInitialProfile() {
   return Object.keys(SCAN_DATA || {})[0] || "medium";
 }
 
+const TableRow = React.memo(function TableRow({ row, columns, isSelected, onSelect, onEnter, onLeave }) {
+  return (
+    <tr
+      className={isSelected ? "selected" : ""}
+      onClick={() => onSelect(row)}
+      onMouseEnter={(e) => onEnter(row, e)}
+      onMouseLeave={onLeave}
+    >
+      {columns.map(c => renderCell(c, row))}
+    </tr>
+  );
+});
+
 function ScannerApp() {
   const [settings, setSettings] = useState(loadSettings);
   const setSetting = (k, v) => setSettings(s => {
@@ -380,7 +393,7 @@ function ScannerApp() {
   const [hover, setHover] = useState(null);
   const hoverTimerRef = useRef(null);
 
-  const showHover = (row, e) => {
+  const showHover = useCallback((row, e) => {
     const cx = e.clientX, cy = e.clientY;
     if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
     hoverTimerRef.current = setTimeout(() => {
@@ -391,11 +404,15 @@ function ScannerApp() {
       if (top  + H > window.innerHeight - 8) top  = cy - H - G;
       setHover({ row, top: Math.max(8, top), left: Math.max(8, left) });
     }, 200);
-  };
-  const hideHover = () => {
+  }, []);
+  const hideHover = useCallback(() => {
     if (hoverTimerRef.current) { clearTimeout(hoverTimerRef.current); hoverTimerRef.current = null; }
     setHover(null);
-  };
+  }, []);
+  const onSelectRow = useCallback((row) => {
+    hideHover();
+    setSelected(row);
+  }, [hideHover]);
   const [hiddenCols, setHiddenCols] = useState(() => {
     try {
       const saved = localStorage.getItem("csp.hiddenCols");
@@ -726,15 +743,15 @@ function ScannerApp() {
           </thead>
           <tbody>
             {filtered.map(row => (
-              <tr
+              <TableRow
                 key={row.sym}
-                className={selected?.sym === row.sym ? "selected" : ""}
-                onClick={() => { hideHover(); setSelected(row); }}
-                onMouseEnter={(e) => showHover(row, e)}
-                onMouseLeave={hideHover}
-              >
-                {visibleColumns.map(c => renderCell(c, row))}
-              </tr>
+                row={row}
+                columns={visibleColumns}
+                isSelected={selected?.sym === row.sym}
+                onSelect={onSelectRow}
+                onEnter={showHover}
+                onLeave={hideHover}
+              />
             ))}
             {!filtered.length && (
               <tr><td colSpan={visibleColumns.length} style={{textAlign:"center", color:"var(--text-3)", padding: "40px"}}>No matches.</td></tr>

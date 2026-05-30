@@ -32,6 +32,12 @@ jobs:
           python-version: '3.12'
           cache: pip
 
+      - name: Set up Node + esbuild
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm install -g esbuild
+
       - name: Restore scanner state (cache + history)
         uses: actions/cache@v4
         with:

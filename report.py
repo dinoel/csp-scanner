@@ -10,6 +10,7 @@ import datetime
 import json
 import math
 import shutil
+import subprocess
 from pathlib import Path
 
 import pandas as pd
@@ -51,25 +52,68 @@ tbody tr:hover td{filter:brightness(1.5)}
 """
 
 _ASSETS_DIR = Path(__file__).parent / "report_assets"
-_SHARED_ASSET_NAMES = ("scan.html", "scanner.css", "scanner.jsx")
+# scanner.jsx is compiled to scanner.js via esbuild; the rest are plain copies.
+_COPY_ASSETS = ("scan.html", "scanner.css")
+_JSX_SRC = "scanner.jsx"
+_JS_DST  = "scanner.js"
+
+
+def _esbuild_cmd() -> list[str] | None:
+    """Discover an esbuild invocation. Returns argv prefix or None if missing."""
+    exe = shutil.which("esbuild")
+    if exe:
+        return [exe]
+    npx = shutil.which("npx")
+    if npx:
+        # `npx --yes esbuild` auto-installs if missing (one-time, cached).
+        return [npx, "--yes", "esbuild"]
+    return None
+
+
+def _compile_jsx(src: Path, dst: Path) -> None:
+    """Compile JSX → JS via esbuild. Raises RuntimeError if esbuild unavailable."""
+    cmd_prefix = _esbuild_cmd()
+    if not cmd_prefix:
+        raise RuntimeError(
+            "esbuild is required to compile scanner.jsx. Install with one of:\n"
+            "  npm install -g esbuild\n"
+            "  (or ensure `npx` is in PATH — it will auto-fetch esbuild)"
+        )
+    cmd = cmd_prefix + [
+        str(src),
+        "--loader:.jsx=jsx",
+        "--jsx=transform",
+        "--jsx-factory=React.createElement",
+        "--jsx-fragment=React.Fragment",
+        "--minify",
+        f"--outfile={dst}",
+    ]
+    subprocess.run(cmd, check=True)
 
 
 def sync_assets(results_root: Path | str = Path("results")) -> None:
-    """Mirror report_assets/{scan.html,scanner.css,scanner.jsx} into <results_root>/_assets/.
+    """Mirror static assets and compile scanner.jsx → scanner.js into <results_root>/_assets/.
 
-    Copies a file only if missing or its bytes differ — running it repeatedly
-    is cheap. Exposed as a CLI (`python -m report sync [dir]`) so the user can
-    refresh shared assets after editing report_assets/ without rerunning a scan.
+    Copies plain files only if missing or content differs; compiles JSX only
+    if the destination JS is missing or older than the JSX source. Exposed as
+    `python -m report sync [dir]`.
     """
     root = Path(results_root)
     assets_dir = root / "_assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
-    for name in _SHARED_ASSET_NAMES:
+
+    for name in _COPY_ASSETS:
         src = _ASSETS_DIR / name
         dst = assets_dir / name
         if not dst.exists() or dst.read_bytes() != src.read_bytes():
             shutil.copyfile(src, dst)
             print(f"Synced {dst}")
+
+    jsx_src = _ASSETS_DIR / _JSX_SRC
+    js_dst  = assets_dir / _JS_DST
+    if not js_dst.exists() or jsx_src.stat().st_mtime > js_dst.stat().st_mtime:
+        _compile_jsx(jsx_src, js_dst)
+        print(f"Compiled {js_dst}")
 
 
 def _safe_float(v):
