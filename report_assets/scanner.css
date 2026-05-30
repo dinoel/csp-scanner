@@ -47,11 +47,11 @@
 }
 
 * { box-sizing: border-box; }
-html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 13px; line-height: 1.4; }
+html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 13px; line-height: 1.4; overflow-x: hidden; }
 body { min-height: 100vh; }
 
 /* Top app bar */
-.app { display: flex; flex-direction: column; min-height: 100vh; }
+.app { display: flex; flex-direction: column; min-height: 100vh; width: 100%; max-width: 100vw; overflow-x: hidden; }
 
 .topbar {
   display: flex;
@@ -62,6 +62,8 @@ body { min-height: 100vh; }
   background: linear-gradient(180deg, var(--bg-2), var(--bg));
   position: sticky; top: 0; z-index: 30;
   backdrop-filter: blur(8px);
+  flex-wrap: wrap;
+  row-gap: 10px;
 }
 .brand {
   display: flex; align-items: center; gap: 10px;
@@ -97,7 +99,7 @@ body { min-height: 100vh; }
 .profile-switch button:last-child { border-right: none; }
 .profile-switch button.active { color: var(--text); background: var(--bg-3); }
 
-.topbar-right { margin-left: auto; display: flex; align-items: center; gap: 18px; }
+.topbar-right { margin-left: auto; display: flex; align-items: center; gap: 18px; flex-wrap: wrap; row-gap: 8px; }
 .kpi { display: flex; align-items: baseline; gap: 6px; }
 .kpi-label { color: var(--text-3); font-size: 11px; font-family: var(--mono); text-transform: uppercase; letter-spacing: 0.06em; }
 .kpi-val { font-family: var(--mono); font-size: 13px; color: var(--text); }
@@ -120,6 +122,7 @@ body { min-height: 100vh; }
   background: var(--bg);
   position: sticky; top: 56px; z-index: 25;
   overflow-x: auto;
+  max-width: 100vw;
 }
 .tab {
   display: flex; align-items: center; gap: 8px;
@@ -180,6 +183,7 @@ body { min-height: 100vh; }
   overflow: auto;
   position: relative;
   contain: layout style;
+  max-width: 100vw;
 }
 .app { contain: layout; }
 table.scan tbody tr {
@@ -731,3 +735,24 @@ td.col-sym {
 .table-wrap::-webkit-scrollbar-track { background: var(--bg); }
 .table-wrap::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 5px; }
 .table-wrap::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
+
+/* Mobile / narrow viewport — keep page locked to viewport width;
+   wrap topbar/criteria/footer so only the table scrolls horizontally. */
+@media (max-width: 700px) {
+  .topbar { padding: 10px 14px; gap: 10px; }
+  .topbar-right { margin-left: 0; width: 100%; justify-content: space-between; gap: 10px; }
+  .brand-sub { display: none; }
+  .brand-back { margin-left: 8px; padding-left: 8px; }
+  .timestamp { font-size: 10px; }
+  .kpi-label { display: none; }
+  .criteria { flex-wrap: wrap; }
+  .crit-cell { padding: 6px 10px; }
+  .search-wrap input { width: 90px; }
+  .footer { flex-wrap: wrap; gap: 6px 14px; font-size: 10px; }
+
+  .drawer { width: 100%; max-width: 100%; }
+  .drawer-body { padding: 14px 16px 28px; }
+  .kvgrid { grid-template-columns: 1fr; }
+  .kv { border-right: none; }
+  .hover-pop img { width: 100%; height: auto; }
+}

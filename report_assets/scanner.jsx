@@ -394,6 +394,7 @@ function ScannerApp() {
   const hoverTimerRef = useRef(null);
 
   const showHover = useCallback((row, e) => {
+    if (!window.matchMedia('(hover: hover)').matches) return;
     const cx = e.clientX, cy = e.clientY;
     if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
     hoverTimerRef.current = setTimeout(() => {
