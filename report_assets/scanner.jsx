@@ -403,12 +403,30 @@ function ScannerApp() {
     } catch (e) {}
     return new Set(DEFAULT_HIDDEN);
   });
+  const [colOrder, setColOrder] = useState(() => {
+    const defaultOrder = COLUMNS.map(c => c.key);
+    try {
+      const saved = JSON.parse(localStorage.getItem("csp.colOrder") || "null");
+      if (Array.isArray(saved)) {
+        const known = new Set(defaultOrder);
+        const filtered = saved.filter(k => known.has(k));
+        const missing = defaultOrder.filter(k => !filtered.includes(k));
+        return [...filtered, ...missing];
+      }
+    } catch (e) {}
+    return defaultOrder;
+  });
+  const [dragKey, setDragKey]     = useState(null);
+  const [dropAtKey, setDropAtKey] = useState(null);
   const [colPickerOpen, setColPickerOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   useEffect(() => {
     try { localStorage.setItem("csp.hiddenCols", JSON.stringify([...hiddenCols])); } catch (e) {}
   }, [hiddenCols]);
+  useEffect(() => {
+    try { localStorage.setItem("csp.colOrder", JSON.stringify(colOrder)); } catch (e) {}
+  }, [colOrder]);
 
   const toggleCol = (key) => setHiddenCols(s => {
     const n = new Set(s);
@@ -416,14 +434,38 @@ function ScannerApp() {
     return n;
   });
   const showAllCols = () => setHiddenCols(new Set());
-  const resetCols   = () => setHiddenCols(new Set(DEFAULT_HIDDEN));
+  const resetCols   = () => {
+    setHiddenCols(new Set(DEFAULT_HIDDEN));
+    setColOrder(COLUMNS.map(c => c.key));
+  };
+
+  const moveCol = (fromKey, toKey) => {
+    if (!fromKey || !toKey || fromKey === toKey) return;
+    setColOrder(order => {
+      const fromIdx = order.indexOf(fromKey);
+      const toIdx   = order.indexOf(toKey);
+      if (fromIdx < 0 || toIdx < 0) return order;
+      const out = order.slice();
+      out.splice(fromIdx, 1);
+      out.splice(out.indexOf(toKey) + (toIdx > fromIdx ? 1 : 0), 0, fromKey);
+      return out;
+    });
+  };
 
   const colBtnRef = useRef(null);
   const setBtnRef = useRef(null);
 
+  const colByKey = useMemo(() => {
+    const m = {};
+    COLUMNS.forEach(c => { m[c.key] = c; });
+    return m;
+  }, []);
+
   const visibleColumns = useMemo(
-    () => COLUMNS.filter(c => c.always || !hiddenCols.has(c.key)),
-    [hiddenCols]
+    () => colOrder
+      .map(k => colByKey[k])
+      .filter(c => c && (c.always || !hiddenCols.has(c.key))),
+    [colOrder, colByKey, hiddenCols]
   );
 
   const tabSet = useMemo(() => new Set(tabs[activeTab] || []), [tabs, activeTab]);
@@ -634,24 +676,52 @@ function ScannerApp() {
         <table className="scan">
           <thead>
             <tr>
-              {visibleColumns.map((c) => (
-                <th
-                  key={c.key}
-                  className={[
-                    c.sticky ? "col-sym" : "",
-                    "sortable",
-                    sortKey === (c.key === "iv_hv" ? "iv" : c.key) ? "sorted" : "",
-                    c.group ? "colgroup-" + c.group : "",
-                  ].join(" ")}
-                  onClick={() => sortBy(c.key === "iv_hv" ? "iv" : c.key)}
-                  title={COL_DESC[c.key] || c.label}
-                >
-                  {c.label}
-                  {sortKey === (c.key === "iv_hv" ? "iv" : c.key) && (
-                    <span className="sort-ind">{sortDir === "asc" ? "↑" : "↓"}</span>
-                  )}
-                </th>
-              ))}
+              {visibleColumns.map((c) => {
+                const draggable = !c.sticky;
+                const isDragging = dragKey === c.key;
+                const isDropTarget = dropAtKey === c.key && dragKey && dragKey !== c.key;
+                return (
+                  <th
+                    key={c.key}
+                    draggable={draggable}
+                    className={[
+                      c.sticky ? "col-sym" : "",
+                      "sortable",
+                      sortKey === (c.key === "iv_hv" ? "iv" : c.key) ? "sorted" : "",
+                      c.group ? "colgroup-" + c.group : "",
+                      draggable ? "draggable" : "",
+                      isDragging ? "dragging" : "",
+                      isDropTarget ? "drop-target" : "",
+                    ].join(" ")}
+                    onClick={() => { if (!isDragging) sortBy(c.key === "iv_hv" ? "iv" : c.key); }}
+                    title={COL_DESC[c.key] || c.label}
+                    onDragStart={draggable ? (e) => {
+                      e.dataTransfer.effectAllowed = "move";
+                      e.dataTransfer.setData("text/plain", c.key);
+                      setDragKey(c.key);
+                    } : undefined}
+                    onDragOver={draggable ? (e) => {
+                      if (!dragKey || dragKey === c.key) return;
+                      e.preventDefault();
+                      e.dataTransfer.dropEffect = "move";
+                      if (dropAtKey !== c.key) setDropAtKey(c.key);
+                    } : undefined}
+                    onDragLeave={() => { if (dropAtKey === c.key) setDropAtKey(null); }}
+                    onDrop={draggable ? (e) => {
+                      e.preventDefault();
+                      const from = e.dataTransfer.getData("text/plain") || dragKey;
+                      moveCol(from, c.key);
+                      setDragKey(null); setDropAtKey(null);
+                    } : undefined}
+                    onDragEnd={() => { setDragKey(null); setDropAtKey(null); }}
+                  >
+                    {c.label}
+                    {sortKey === (c.key === "iv_hv" ? "iv" : c.key) && (
+                      <span className="sort-ind">{sortDir === "asc" ? "↑" : "↓"}</span>
+                    )}
+                  </th>
+                );
+              })}
             </tr>
           </thead>
           <tbody>

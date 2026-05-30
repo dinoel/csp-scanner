@@ -36,7 +36,6 @@ class PutRow:
     analyst_num: int      # number of analysts covering the stock
     analyst_target: float # analyst mean price target
     analyst_upside: float # (target - price) / price * 100
-    company_name: str = ""  # longName from yfinance; "" if unavailable
     fundamental_score: float  # 0-100 (NaN if FINANCIALDATASETS_API_KEY not set)
     rev_growth:    float      # YoY revenue growth %
     eps_beat_rate: float      # % of last 8 quarters beating estimates
@@ -46,3 +45,4 @@ class PutRow:
     pcr:           float      # put/call volume ratio for selected expiry
     rr_25d_pct:    float      # 25-delta risk reversal normalised (%) — put skew
     score: float          # composite score (higher = better)
+    company_name: str = ""  # longName from yfinance; "" if unavailable

@@ -207,6 +207,13 @@ table.scan thead th {
 table.scan thead th.sortable:hover { color: var(--text); }
 table.scan thead th.sorted { color: var(--text); }
 table.scan thead th .sort-ind { display: inline-block; width: 8px; margin-left: 4px; color: var(--accent); }
+table.scan thead th.draggable { cursor: grab; }
+table.scan thead th.draggable:active { cursor: grabbing; }
+table.scan thead th.dragging { opacity: 0.4; }
+table.scan thead th.drop-target {
+  box-shadow: inset 2px 0 0 var(--accent);
+  color: var(--text);
+}
 table.scan thead th.col-sym {
   text-align: left;
   padding-left: 14px;
