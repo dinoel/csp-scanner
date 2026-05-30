@@ -36,4 +36,5 @@ class YFinanceProvider(DataProvider):
             "rating":       info.get("recommendationKey") or "",
             "target":       float(target_raw) if target_raw else float("nan"),
             "num_analysts": int(info.get("numberOfAnalystOpinions") or 0),
+            "company_name": info.get("longName") or info.get("shortName") or "",
         }

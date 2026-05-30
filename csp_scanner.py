@@ -40,7 +40,7 @@ from ai import ai_analysis
 from cache import CACHE
 from models import PutRow
 from providers import get_provider
-from report import RATING_ABBREV, write_html
+from report import RATING_ABBREV, build_profile_block, write_scan_bundle
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 #UNIVERSE: str | list[str] = ["NVDA", "INTC", "AMD", "PLTR", "MCD", "ASTS", "TEAM", "NBIS", "IREN", "EMR", "ORCL", "DELL", "SMCI", "HAL", "GLW", "FCX", "HUT", "ARM"]
@@ -53,7 +53,6 @@ MIN_BID = 0.05
 COMPUTE_IV_RANK = True
 MAX_WORKERS = 6      # parallel ticker scans; keep ≤8 to avoid Yahoo rate limits
 RESULTS_DIR = "results"
-HTML_OUT_TEMPLATE = "csp_scan_{profile}.html"
 PROFILES_TO_RUN = ["low", "medium", "high"]
 #PROFILES_TO_RUN = ["medium"]
 DEFAULT_PROFILE = "medium"  # which profile the index links to by default
@@ -457,6 +456,7 @@ def scan_ticker(symbol: str) -> Optional[PutRow]:
                 analyst_num=analyst.get("num_analysts", 0),
                 analyst_target=_r(a_target, 2),
                 analyst_upside=a_upside,
+                company_name=analyst.get("company_name", ""),
                 fundamental_score=fund.score,
                 rev_growth=fund.rev_growth_pct,
                 eps_beat_rate=fund.eps_beat_rate,
@@ -483,19 +483,9 @@ def scan_ticker(symbol: str) -> Optional[PutRow]:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def _profile_nav_html(current: str) -> str:
-    parts = ['<div class="nav">',
-             '<a href="../index.html">&larr; All scans</a>',
-             '<span class="sep">|</span>']
-    for i, p in enumerate(PROFILES_TO_RUN):
-        if i:
-            parts.append('<span class="sep">·</span>')
-        if p == current:
-            parts.append(f'<span class="cur">{p}</span>')
-        else:
-            parts.append(f'<a href="{HTML_OUT_TEMPLATE.format(profile=p)}">{p}</a>')
-    parts.append('</div>')
-    return ''.join(parts)
+def _scan_link(folder: str, profile: str) -> str:
+    """Link to the shared HTML shell for a given scan + profile."""
+    return f"_assets/scan.html?scan={folder}&profile={profile}"
 
 
 def _build_index_html(results_root: Path) -> None:
@@ -524,9 +514,9 @@ def _build_index_html(results_root: Path) -> None:
             f"{p}={counts.get(p, '-')}"
             for p in PROFILES_TO_RUN
         )
-        default_link = f"{folder}/{HTML_OUT_TEMPLATE.format(profile=DEFAULT_PROFILE)}"
+        default_link = _scan_link(folder, DEFAULT_PROFILE)
         profile_links = " · ".join(
-            f'<a href="{folder}/{HTML_OUT_TEMPLATE.format(profile=p)}">{p}</a>'
+            f'<a href="{_scan_link(folder, p)}">{p}</a>'
             for p in PROFILES_TO_RUN
         )
         body_rows.append(
@@ -579,15 +569,17 @@ def main():
     scan_dir.mkdir(parents=True, exist_ok=True)
 
     counts: dict[str, int] = {}
+    scan_data: dict[str, dict] = {}
     for profile_name in PROFILES_TO_RUN:
         globals().update(_PROFILES[profile_name])
         globals()["RISK_PROFILE"] = profile_name
-        html_out = str(scan_dir / HTML_OUT_TEMPLATE.format(profile=profile_name))
-        nav_html = _profile_nav_html(profile_name)
         print(f"\n{'#'*70}")
-        print(f"#  PROFILE: {profile_name.upper()}  →  {html_out}")
+        print(f"#  PROFILE: {profile_name.upper()}")
         print(f"{'#'*70}")
-        counts[profile_name] = _run_profile(tickers, html_out, nav_html)
+        counts[profile_name] = _run_profile(tickers, profile_name, scan_data)
+
+    if scan_data:
+        write_scan_bundle(scan_dir, scan_data)
 
     meta = {
         "timestamp": scan_ts,
@@ -598,7 +590,7 @@ def main():
     _build_index_html(results_root)
 
 
-def _run_profile(tickers: list[str], html_out: str, nav_html: str = "") -> int:
+def _run_profile(tickers: list[str], profile: str, scan_data: dict) -> int:
     print(f"Scanning {len(tickers)} tickers  |  profile={RISK_PROFILE.upper()}  "
           f"|  DTE {DTE_MIN}-{DTE_MAX}  |  |Δ| {DELTA_MIN}-{DELTA_MAX}  "
           f"|  strike≤{MAX_STRIKE}  |  vol≥{MIN_VOLUME}  spread≤{MAX_SPREAD_PCT:.0%}\n")
@@ -791,8 +783,12 @@ def _run_profile(tickers: list[str], html_out: str, nav_html: str = "") -> int:
     config_str = (f"Universe: {UNIVERSE}  |  Profile: {RISK_PROFILE}  |  "
                   f"DTE: {DTE_MIN}-{DTE_MAX}  |  |Δ|: {DELTA_MIN}-{DELTA_MAX}  |  "
                   f"strike≤{MAX_STRIKE}  |  vol≥{MIN_VOLUME}  |  spread≤{MAX_SPREAD_PCT:.0%}")
-    write_html(df, config_str, failed, ai_text=ai_text, ai_top_n=AI_TOP_N,
-               html_out=html_out, nav_html=nav_html)
+    scan_data[profile] = build_profile_block(
+        df, config_str, failed,
+        ai_text=ai_text, ai_top_n=AI_TOP_N,
+        profile=profile, index_href="../index.html",
+    )
+    return len(df)
 
     if failed:
         print(f"\n[!] {len(failed)} tickers skipped due to rate limiting:")
