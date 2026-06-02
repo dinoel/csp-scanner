@@ -379,6 +379,24 @@ def _fmt_reject_stats(stats: Counter) -> str:
 
 # ── Universe loaders ──────────────────────────────────────────────────────────
 
+# Popular option-liquid ETFs: leveraged broad/sector/single-stock + a few
+# high-volume non-leveraged thematics. CSP on leveraged ETFs is rough because
+# of volatility decay — caveat emptor.
+ETF_UNIVERSE = [
+    # Leveraged broad index
+    "TQQQ", "TNA", "UPRO", "URTY", "FAS",
+    # Leveraged sector
+    "SOXL", "TECL", "LABU", "GUSH", "ERX",
+    # Leveraged single-stock
+    "NVDL", "TSLL", "CONL", "MSTU", "AAPB", "AMZU", "AVL", "GGLL",
+    # Leveraged crypto
+    "BITX", "BITU", "ETHU",
+    # High-liquidity non-leveraged benchmarks/sectors/themes
+    "SPY", "QQQ", "IWM",
+    "SOXX", "SMH", "XLF", "XLE", "XLK", "XLU", "GDX", "ARKK", "USO",
+]
+
+
 def _fetch_sp500() -> list[str]:
     df = pd.read_csv(SP500_URL)
     return [s.replace(".", "-") for s in df["Symbol"].tolist()]
@@ -411,6 +429,8 @@ def get_tickers() -> list[str]:
     if UNIVERSE == "screener":
         from screener import get_candidates
         return get_candidates(max_price=MAX_STRIKE or 200, verbose=True)
+    if UNIVERSE == "etf":
+        return list(ETF_UNIVERSE)
     raise ValueError(f"Unknown universe: {UNIVERSE!r}")
 
 
