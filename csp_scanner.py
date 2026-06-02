@@ -223,15 +223,19 @@ def score_put(ann_rtn: float, profit_prob: float, vs_em: float,
 
 # ── Liquidity filter (depends on MIN_* config globals) ───────────────────────
 
-def _effective_price(row) -> tuple[float, float, str]:
+def _effective_price(row, oi_unavailable: bool = False) -> tuple[float, float, str]:
     """Return (price_for_iv, bid_for_return, reject_reason).
 
     `reject_reason` is "" on success, otherwise a REJECT_LABELS key naming
     which liquidity stage filtered the contract out.
+
+    If `oi_unavailable` is True (Yahoo returned openInterest=0 for the entire
+    chain — known quirk), the OI filter is skipped for this row.
     """
-    oi = _int(row.get("openInterest"))
-    if oi < MIN_OPEN_INTEREST:
-        return float("nan"), float("nan"), "oi"
+    if not oi_unavailable:
+        oi = _int(row.get("openInterest"))
+        if oi < MIN_OPEN_INTEREST:
+            return float("nan"), float("nan"), "oi"
 
     vol = _int(row.get("volume"))
     if vol < MIN_VOLUME:
@@ -316,12 +320,24 @@ def find_best_put(puts: pd.DataFrame, spot: float, T: float, r: float,
     dte = max(T * 365.0, 1.0)
     stats: Counter = Counter()
 
+    # Yahoo quirk: sometimes the API returns openInterest=0 for an entire
+    # chain (whole-market, not per-contract). When that's the case, skip the
+    # OI filter for this chain — otherwise every strike would be wrongly
+    # rejected. The chain-level fact is tracked in stats["oi_unavailable"].
+    oi_unavailable = (
+        "openInterest" in puts.columns
+        and len(puts) > 0
+        and float(puts["openInterest"].fillna(0).max() or 0) == 0
+    )
+    if oi_unavailable:
+        stats["oi_unavailable"] += 1
+
     _need = [c for c in ("strike", "bid", "ask", "lastPrice", "volume",
                          "openInterest", "lastTradeDate")
              if c in puts.columns]
     for row in puts[_need].to_dict("records"):
         stats["examined"] += 1
-        price_iv, bid_ret, reason = _effective_price(row)
+        price_iv, bid_ret, reason = _effective_price(row, oi_unavailable=oi_unavailable)
         if reason:
             stats[reason] += 1
             continue
@@ -548,17 +564,21 @@ def scan_ticker(symbol: str) -> tuple[Optional[PutRow], Counter]:
             agg["exception"] += 1
             continue
 
+    oi_skipped_expiries = agg.get("oi_unavailable", 0)
     if best_row is None:
         examined = agg.get("examined", 0)
         n_exp    = agg.get("examined_expiries", 0)
+        oi_note  = (f" [Yahoo OI=0 across whole chain on {oi_skipped_expiries}/{n_exp} "
+                    f"expiries; OI filter bypassed there]" if oi_skipped_expiries else "")
         log.info(
             f"[{symbol}] no qualifying put — examined {examined} strikes across "
             f"{n_exp} expir{'y' if n_exp == 1 else 'ies'}. Filters: "
-            f"{_fmt_reject_stats(agg)}"
+            f"{_fmt_reject_stats(agg)}{oi_note}"
         )
     else:
+        oi_note = " [OI filter bypassed — Yahoo OI=0]" if oi_skipped_expiries else ""
         log.info(f"[{symbol}] OK strike={best_row.strike} dte={best_row.dte} "
-                 f"delta={best_row.delta:.3f} ann={best_row.ann_rtn:.1f}%")
+                 f"delta={best_row.delta:.3f} ann={best_row.ann_rtn:.1f}%{oi_note}")
     return best_row, agg
 
 
@@ -718,6 +738,7 @@ def _run_profile(tickers: list[str], profile: str, scan_data: dict) -> int:
         f"({n_no_result} with no result, {len(failed)} skipped)."
     )
     if global_stats:
+        oi_bypassed = global_stats.get("oi_unavailable", 0)
         log.info(
             f"  Examined {global_stats.get('examined', 0):,} strikes across "
             f"{global_stats.get('examined_expiries', 0):,} expir(ies). "
@@ -726,6 +747,11 @@ def _run_profile(tickers: list[str], profile: str, scan_data: dict) -> int:
             f"no_expiry={global_stats.get('no_expiry', 0)}, "
             f"exception={global_stats.get('exception', 0)}."
         )
+        if oi_bypassed:
+            log.warning(
+                f"  ⚠ OI filter auto-bypassed on {oi_bypassed:,} expiries "
+                f"(Yahoo returned openInterest=0 for the entire chain — known data quirk)."
+            )
         log.info("  Top rejection reasons (across all expiries):")
         for k, v in sorted(global_stats.items(), key=lambda kv: -kv[1]):
             if k in REJECT_LABELS and v:
