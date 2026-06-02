@@ -19,10 +19,13 @@ from __future__ import annotations
 import html as _he
 import io
 import json
+import logging
 import math
 import os
 import random
+import sys
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -31,6 +34,31 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+# LOG_LEVEL env var controls verbosity. Defaults to INFO (per-ticker outcomes
+# and progress). Set LOG_LEVEL=DEBUG for per-strike rejection reasons,
+# WARNING to suppress everything except errors/rate-limits.
+_LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    format="%(message)s",
+    level=getattr(logging, _LOG_LEVEL, logging.INFO),
+    stream=sys.stdout,
+    force=True,  # override prior basicConfig from libraries
+)
+log = logging.getLogger("csp")
+
+# Human-readable labels for the rejection counters produced by find_best_put.
+REJECT_LABELS = {
+    "oi":         "OI < MIN_OPEN_INTEREST",
+    "vol":        "vol < MIN_VOLUME",
+    "stale":      "stale lastTradeDate",
+    "spread":     "spread > MAX_SPREAD_PCT",
+    "no_quote":   "no bid/ask/last",
+    "iv_solve":   "IV solver failed",
+    "delta_out":  "|delta| out of range",
+    "strike_max": "strike > MAX_STRIKE",
+}
 
 import analytics
 import fundamentals as _fund
@@ -195,15 +223,19 @@ def score_put(ann_rtn: float, profit_prob: float, vs_em: float,
 
 # ── Liquidity filter (depends on MIN_* config globals) ───────────────────────
 
-def _effective_price(row) -> tuple[float, float]:
-    """Return (price_for_iv, bid_for_return) or (nan, nan) if liquidity filters fail."""
+def _effective_price(row) -> tuple[float, float, str]:
+    """Return (price_for_iv, bid_for_return, reject_reason).
+
+    `reject_reason` is "" on success, otherwise a REJECT_LABELS key naming
+    which liquidity stage filtered the contract out.
+    """
     oi = _int(row.get("openInterest"))
     if oi < MIN_OPEN_INTEREST:
-        return float("nan"), float("nan")
+        return float("nan"), float("nan"), "oi"
 
     vol = _int(row.get("volume"))
     if vol < MIN_VOLUME:
-        return float("nan"), float("nan")
+        return float("nan"), float("nan"), "vol"
 
     # Staleness check: yfinance 'volume' is from the last session the contract
     # actually traded — not necessarily today. Reject options whose last trade
@@ -214,7 +246,7 @@ def _effective_price(row) -> tuple[float, float]:
             trade_date = (last_trade.date() if hasattr(last_trade, "date")
                           else datetime.strptime(str(last_trade)[:10], "%Y-%m-%d").date())
             if trade_date < _last_valid_trade_date():
-                return float("nan"), float("nan")
+                return float("nan"), float("nan"), "stale"
         except Exception:
             pass
 
@@ -224,18 +256,18 @@ def _effective_price(row) -> tuple[float, float]:
 
     if bid > 0 and ask > 0:
         if (ask - bid) / bid > MAX_SPREAD_PCT:
-            return float("nan"), float("nan")
-        return (bid + ask) / 2, bid
+            return float("nan"), float("nan"), "spread"
+        return (bid + ask) / 2, bid, ""
 
     if bid > MIN_BID:
-        return bid, bid
+        return bid, bid, ""
 
     if last > MIN_BID:
         if vol < max(MIN_VOLUME * 5, 50):
-            return float("nan"), float("nan")
-        return last, last
+            return float("nan"), float("nan"), "stale"
+        return last, last, ""
 
-    return float("nan"), float("nan")
+    return float("nan"), float("nan"), "no_quote"
 
 
 # ── Scan helpers ──────────────────────────────────────────────────────────────
@@ -272,29 +304,41 @@ def check_earnings(cal: dict, today, expiry_date) -> Optional[str]:
 
 
 def find_best_put(puts: pd.DataFrame, spot: float, T: float, r: float,
-                  ma200: float, em: float) -> Optional[tuple]:
-    """Score every eligible put strike and return the best one."""
+                  ma200: float, em: float) -> tuple[Optional[tuple], Counter]:
+    """Score every eligible put strike and return (best, stats).
+
+    `stats` is a Counter with keys: "examined", "considered" (passed all
+    filters), and one entry per REJECT_LABELS key counting which stage
+    rejected each strike.
+    """
     best = None
     best_score = float("-inf")
     dte = max(T * 365.0, 1.0)
+    stats: Counter = Counter()
 
     _need = [c for c in ("strike", "bid", "ask", "lastPrice", "volume",
                          "openInterest", "lastTradeDate")
              if c in puts.columns]
     for row in puts[_need].to_dict("records"):
-        price_iv, bid_ret = _effective_price(row)
-        if math.isnan(price_iv) or math.isnan(bid_ret):
+        stats["examined"] += 1
+        price_iv, bid_ret, reason = _effective_price(row)
+        if reason:
+            stats[reason] += 1
             continue
         strike = float(row["strike"])
         iv = analytics.compute_iv(spot, strike, T, r, price_iv)
         if math.isnan(iv):
+            stats["iv_solve"] += 1
             continue
         delta = analytics.bs_put_delta(spot, strike, T, r, iv)
         if math.isnan(delta) or not (DELTA_MIN <= abs(delta) <= DELTA_MAX):
+            stats["delta_out"] += 1
             continue
         if MAX_STRIKE and strike > MAX_STRIKE:
+            stats["strike_max"] += 1
             continue
 
+        stats["considered"] += 1
         pp    = analytics.calc_profit_prob(spot, strike, T, r, iv)
         ann   = (bid_ret / strike * 100.0) * (365.0 / dte)
         vs_em = (spot - strike) / em * 100.0 if (not math.isnan(em) and em > 0) else float("nan")
@@ -305,7 +349,16 @@ def find_best_put(puts: pd.DataFrame, spot: float, T: float, r: float,
             best_score = sc
             best = (strike, iv, bid_ret, float(row.get("ask") or 0),
                     _int(row.get("volume")), _int(row.get("openInterest")), delta)
-    return best
+    return best, stats
+
+
+def _fmt_reject_stats(stats: Counter) -> str:
+    """Format a Counter of rejection reasons as a one-line, sorted breakdown."""
+    parts = []
+    for k, v in stats.most_common():
+        if k in REJECT_LABELS and v:
+            parts.append(f"{v} {REJECT_LABELS[k]}")
+    return ", ".join(parts) or "(no examined strikes)"
 
 
 # ── Universe loaders ──────────────────────────────────────────────────────────
@@ -347,19 +400,30 @@ def get_tickers() -> list[str]:
 
 # ── Per-ticker scan ───────────────────────────────────────────────────────────
 
-def scan_ticker(symbol: str) -> Optional[PutRow]:
+def scan_ticker(symbol: str) -> tuple[Optional[PutRow], Counter]:
+    """Scan one ticker.
+
+    Returns (best_row | None, agg_stats). `agg_stats` aggregates the per-
+    expiry rejection counters from find_best_put plus ticker-level flags
+    (``no_spot``, ``no_expiry``, ``no_chain``, ``examined_expiries``).
+    Caller logs / aggregates them.
+    """
+    agg: Counter = Counter()
     from_cache = CACHE.get(f"fast_info:{symbol}") is not None
-    print(f"[{symbol}] {'(cache) ' if from_cache else ''}fetching...")
+    log.debug(f"[{symbol}] {'(cache) ' if from_cache else ''}fetching...")
 
     meta = CACHE.fetch(f"fast_info:{symbol}", lambda: PROVIDER.get_spot_and_expirations(symbol))
     spot = float(meta.get("price") or 0)
     if not spot or math.isnan(spot) or spot <= 0:
-        return None
+        log.info(f"[{symbol}] no spot price")
+        agg["no_spot"] += 1
+        return None, agg
 
     today = datetime.now(timezone.utc).date()
 
     expiries: list[tuple[int, str]] = []
-    for s in meta.get("options") or []:
+    all_offered = list(meta.get("options") or [])
+    for s in all_offered:
         try:
             d = datetime.strptime(s, "%Y-%m-%d").date()
             dte = (d - today).days
@@ -369,8 +433,12 @@ def scan_ticker(symbol: str) -> Optional[PutRow]:
             continue
 
     if not expiries:
-        print(f"[{symbol}] no expiry in {DTE_MIN}-{DTE_MAX} DTE")
-        return None
+        log.info(
+            f"[{symbol}] no expiry in {DTE_MIN}-{DTE_MAX} DTE "
+            f"(offered: {len(all_offered)} dates)"
+        )
+        agg["no_expiry"] += 1
+        return None, agg
 
     hist     = CACHE.fetch(f"history:{symbol}",   lambda: PROVIDER.get_history(symbol)) if COMPUTE_IV_RANK else None
     cal      = CACHE.fetch(f"calendar:{symbol}",  lambda: PROVIDER.get_calendar(symbol))
@@ -403,8 +471,11 @@ def scan_ticker(symbol: str) -> Optional[PutRow]:
             pcr  = _r(put_vol / call_vol, 2) if call_vol > 0 else float("nan")
             skew_m = skewlib.compute_skew(calls, puts, spot, T, RISK_FREE_RATE)
 
-            result = find_best_put(puts, spot, T, RISK_FREE_RATE, ma200, em)
+            result, stats = find_best_put(puts, spot, T, RISK_FREE_RATE, ma200, em)
+            agg.update(stats)
+            agg["examined_expiries"] += 1
             if result is None:
+                log.debug(f"[{symbol}] {expiry}: no qualifying put — {_fmt_reject_stats(stats)}")
                 continue
 
             strike, iv, bid, ask, vol, oi, delta = result
@@ -473,12 +544,22 @@ def scan_ticker(symbol: str) -> Optional[PutRow]:
                 best_row = row
 
         except Exception as e:
-            print(f"[{symbol}] {expiry}: {e!r}")
+            log.error(f"[{symbol}] {expiry}: {e!r}")
+            agg["exception"] += 1
             continue
 
     if best_row is None:
-        print(f"[{symbol}] no qualifying put")
-    return best_row
+        examined = agg.get("examined", 0)
+        n_exp    = agg.get("examined_expiries", 0)
+        log.info(
+            f"[{symbol}] no qualifying put — examined {examined} strikes across "
+            f"{n_exp} expir{'y' if n_exp == 1 else 'ies'}. Filters: "
+            f"{_fmt_reject_stats(agg)}"
+        )
+    else:
+        log.info(f"[{symbol}] OK strike={best_row.strike} dte={best_row.dte} "
+                 f"delta={best_row.delta:.3f} ann={best_row.ann_rtn:.1f}%")
+    return best_row, agg
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -547,16 +628,16 @@ def _build_index_html(results_root: Path) -> None:
         "</body></html>"
     )
     (results_root / "index.html").write_text(page, encoding="utf-8")
-    print(f"Updated index → {results_root / 'index.html'}")
+    log.info(f"Updated index → {results_root / 'index.html'}")
 
 
 def main():
     from cache import DB_PATH
     stats = CACHE.stats()
     total = sum(stats.values()) if stats else 0
-    print(f"Cache DB : {DB_PATH}")
-    print(f"Cache    : {dict(stats)}  ({total} entries total)")
-    print("Loading universe...")
+    log.info(f"Cache DB : {DB_PATH}")
+    log.info(f"Cache    : {dict(stats)}  ({total} entries total)")
+    log.info("Loading universe...")
     all_tickers = get_tickers()
     tickers = (
         random.sample(all_tickers, min(SAMPLE_SIZE, len(all_tickers)))
@@ -573,9 +654,9 @@ def main():
     for profile_name in PROFILES_TO_RUN:
         globals().update(_PROFILES[profile_name])
         globals()["RISK_PROFILE"] = profile_name
-        print(f"\n{'#'*70}")
-        print(f"#  PROFILE: {profile_name.upper()}")
-        print(f"{'#'*70}")
+        log.info("\n" + "#" * 70)
+        log.info(f"#  PROFILE: {profile_name.upper()}")
+        log.info("#" * 70)
         counts[profile_name] = _run_profile(tickers, profile_name, scan_data)
 
     if scan_data:
@@ -591,21 +672,28 @@ def main():
 
 
 def _run_profile(tickers: list[str], profile: str, scan_data: dict) -> int:
-    print(f"Scanning {len(tickers)} tickers  |  profile={RISK_PROFILE.upper()}  "
-          f"|  DTE {DTE_MIN}-{DTE_MAX}  |  |Δ| {DELTA_MIN}-{DELTA_MAX}  "
-          f"|  strike≤{MAX_STRIKE}  |  vol≥{MIN_VOLUME}  spread≤{MAX_SPREAD_PCT:.0%}\n")
+    log.info(
+        f"Scanning {len(tickers)} tickers  |  profile={RISK_PROFILE.upper()}  "
+        f"|  DTE {DTE_MIN}-{DTE_MAX}  |  |Δ| {DELTA_MIN}-{DELTA_MAX}  "
+        f"|  strike≤{MAX_STRIKE}  |  vol≥{MIN_VOLUME}  spread≤{MAX_SPREAD_PCT:.0%}\n"
+    )
 
     rows: list[PutRow] = []
     failed: list[str] = []
     rate_errors = 0
+    global_stats: Counter = Counter()
+    n_no_result = 0
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
         futures = {pool.submit(scan_ticker, sym): sym for sym in tickers}
         for fut in as_completed(futures):
             sym = futures[fut]
             try:
-                r = fut.result()
+                r, stats = fut.result()
+                global_stats.update(stats)
                 if r:
                     rows.append(r)
+                else:
+                    n_no_result += 1
                 rate_errors = 0
             except Exception as e:
                 msg = str(e)
@@ -613,17 +701,38 @@ def _run_profile(tickers: list[str], profile: str, scan_data: dict) -> int:
                     rate_errors += 1
                     wait = min(5 * rate_errors, 60)
                     if wait >= 60:
-                        print(f"[{sym}] rate limited — max wait reached, skipping")
+                        log.warning(f"[{sym}] rate limited — max wait reached, skipping")
                         failed.append(sym)
                         rate_errors = 0
                     else:
-                        print(f"[{sym}] rate limited — waiting {wait}s...")
+                        log.warning(f"[{sym}] rate limited — waiting {wait}s...")
                         time.sleep(wait)
                 else:
-                    print(f"[{sym}] error: {e!r}")
+                    log.error(f"[{sym}] error: {e!r}")
+                    n_no_result += 1
+
+    # Per-profile summary: how many tickers found a put, breakdown of why others didn't.
+    log.info(
+        f"\nProfile {profile.upper()} summary: "
+        f"{len(rows)}/{len(tickers)} tickers produced a put "
+        f"({n_no_result} with no result, {len(failed)} skipped)."
+    )
+    if global_stats:
+        log.info(
+            f"  Examined {global_stats.get('examined', 0):,} strikes across "
+            f"{global_stats.get('examined_expiries', 0):,} expir(ies). "
+            f"Ticker-level: "
+            f"no_spot={global_stats.get('no_spot', 0)}, "
+            f"no_expiry={global_stats.get('no_expiry', 0)}, "
+            f"exception={global_stats.get('exception', 0)}."
+        )
+        log.info("  Top rejection reasons (across all expiries):")
+        for k, v in sorted(global_stats.items(), key=lambda kv: -kv[1]):
+            if k in REJECT_LABELS and v:
+                log.info(f"    {v:>8,}  {REJECT_LABELS[k]}")
 
     if not rows:
-        print("No results.")
+        log.warning("No results.")
         return 0
 
     df = pd.DataFrame([asdict(r) for r in rows])
