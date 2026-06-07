@@ -373,15 +373,20 @@ def find_best_put(puts: pd.DataFrame, spot: float, T: float, r: float,
 
 def find_best_bps(puts: pd.DataFrame, spot: float, T: float, r: float,
                   ma200: float, em: float) -> tuple[Optional[dict], Counter]:
-    """Find the best bull put spread (short put A + long put B, B further OTM).
+    """Find the bull put spread with the maximum expected value.
+
+    Iterates every viable (short, long) pair and picks the one with the
+    highest binary EV = P × max_gain − (1−P) × max_loss. Composite
+    `score_put` is still computed for display only.
 
     Returns (best_dict | None, stats). `best_dict` keys: short_strike,
     short_bid, short_ask, short_iv, short_delta, short_vol, short_oi,
     long_strike, long_bid, long_ask, long_iv, long_delta, width, credit,
-    max_loss (per contract), ret_pct (return on margin), ann_rtn, profit_prob.
+    max_loss (per contract), ret_pct (return on margin), ann_rtn,
+    profit_prob, ev, score.
     """
     best = None
-    best_score = float("-inf")
+    best_ev = float("-inf")
     dte = max(T * 365.0, 1.0)
     stats: Counter = Counter()
 
@@ -454,13 +459,18 @@ def find_best_bps(puts: pd.DataFrame, spot: float, T: float, r: float,
             ann     = ret_pct * (365.0 / dte)
             be      = short["strike"] - credit
             pp      = analytics.calc_profit_prob(spot, be, T, r, short["iv"])
+            if math.isnan(pp):
+                continue
             vs_em   = (spot - short["strike"]) / em * 100.0 if (not math.isnan(em) and em > 0) else float("nan")
             ma_sc   = analytics.ma200_score(spot, short["strike"], ma200)
             sc      = score_put(ann, pp, vs_em, ma_sc)
 
+            # Binary expected value, per contract — the selection criterion.
+            ev      = (pp / 100.0) * credit * 100.0 - (1.0 - pp / 100.0) * max_loss
+
             stats["considered"] += 1
-            if sc > best_score:
-                best_score = sc
+            if ev > best_ev:
+                best_ev = ev
                 best = {
                     "short_strike": short["strike"],
                     "short_bid":    short["bid"],
@@ -483,6 +493,7 @@ def find_best_bps(puts: pd.DataFrame, spot: float, T: float, r: float,
                     "be":           be,
                     "vs_em":        vs_em,
                     "score":        sc,
+                    "ev":           ev,
                 }
     return best, stats
 
@@ -659,9 +670,8 @@ def scan_ticker(symbol: str) -> tuple[Optional[PutRow], Counter]:
                 theta       = -analytics.bs_put_theta(spot, strike, T, RISK_FREE_RATE, iv) \
                               + analytics.bs_put_theta(spot, b["long_strike"], T, RISK_FREE_RATE, b["long_iv"])
                 sc          = b["score"]
-                # Binary expected value, per contract:
-                max_gain = b["credit"] * 100.0
-                ev       = (pp / 100.0) * max_gain - (1.0 - pp / 100.0) * b["max_loss"]
+                # EV already computed by find_best_bps as the selection criterion.
+                ev          = b["ev"]
                 long_extras = dict(
                     long_strike = round(b["long_strike"], 2),
                     long_bid    = round(b["long_bid"], 2),
@@ -738,8 +748,11 @@ def scan_ticker(symbol: str) -> tuple[Optional[PutRow], Counter]:
                 **long_extras,
             )
 
-            if sc > best_score:
-                best_score = sc
+            # For BPS we rank cross-expiry by EV (the per-pair selection
+            # criterion); for CSP the composite score_put is still used.
+            rank_key = ev if STRATEGY == "bps" else sc
+            if rank_key > best_score:
+                best_score = rank_key
                 best_row = row
 
         except Exception as e:
