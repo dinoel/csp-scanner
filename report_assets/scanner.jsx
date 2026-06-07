@@ -281,6 +281,7 @@ const COLUMNS = [
   { key: "retPct",   label: "Ret%",    kind: "bar", barKind: "ret",  max: 6,   group: "ret" },
   { key: "annRtn",   label: "AnnRtn%", kind: "bar", barKind: "rtn",  max: 60,  group: "ret" },
   { key: "pProb",    label: "PProb%",  kind: "bar", barKind: "prob", max: 100, group: "ret" },
+  { key: "ev",       label: "EV $",    kind: "signed", suffix: "",            group: "ret" },
   { key: "bePct",    label: "%BE",     fmt: v => v.toFixed(1) + "%",         group: "ret" },
 ];
 
@@ -331,6 +332,7 @@ const COL_DESC = {
   retPct:    "One-period return = premium / strike, in %.",
   annRtn:    "Annualized return = Ret% × 365 / DTE.",
   pProb:     "Probability of expiring OTM (Black-Scholes), in %. Higher = safer trade.",
+  ev:        "Expected value per contract ($): P × max_gain − (1−P) × max_loss. For BPS uses the defined max loss; for CSP it's pessimistic (assumes stock→$0). Negative means the credit doesn't compensate for the asymmetric downside at this probability — even if probability of profit is high.",
   bePct:     "% cushion between spot and break-even. Higher = more room before losing money.",
 };
 

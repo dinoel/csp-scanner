@@ -76,7 +76,7 @@ from report import RATING_ABBREV, build_profile_block, write_scan_bundle
 UNIVERSE: str | list[str] = "screener"
 SAMPLE_SIZE: int | None = None        # tickers to sample; None = full universe
 RISK_PROFILE = "medium"              # "low" | "medium" | "high"
-STRATEGY     = os.getenv("STRATEGY", "csp").lower()  # "csp" | "bps"  (env-overridable)
+STRATEGY     = os.getenv("STRATEGY", "bps").lower()  # "csp" | "bps"  (env-overridable)
 BPS_MAX_WIDTH = 20.0   # widest bull put spread (long-leg distance, $) considered
 BPS_MIN_CREDIT = 0.05  # require at least this much credit per share
 RISK_FREE_RATE = 0.05
@@ -659,6 +659,9 @@ def scan_ticker(symbol: str) -> tuple[Optional[PutRow], Counter]:
                 theta       = -analytics.bs_put_theta(spot, strike, T, RISK_FREE_RATE, iv) \
                               + analytics.bs_put_theta(spot, b["long_strike"], T, RISK_FREE_RATE, b["long_iv"])
                 sc          = b["score"]
+                # Binary expected value, per contract:
+                max_gain = b["credit"] * 100.0
+                ev       = (pp / 100.0) * max_gain - (1.0 - pp / 100.0) * b["max_loss"]
                 long_extras = dict(
                     long_strike = round(b["long_strike"], 2),
                     long_bid    = round(b["long_bid"], 2),
@@ -683,6 +686,10 @@ def scan_ticker(symbol: str) -> tuple[Optional[PutRow], Counter]:
                 ma_sc       = analytics.ma200_score(spot, strike, ma200)
                 sc          = score_put(ann, pp, vs_em, ma_sc, fund.score)
                 long_extras = {}
+                # Binary EV for CSP — pessimistic since max_loss assumes stock→0.
+                max_gain    = bid * 100.0
+                max_loss    = (strike - bid) * 100.0
+                ev          = (pp / 100.0) * max_gain - (1.0 - pp / 100.0) * max_loss
 
             ivr = analytics.get_iv_rank(hist, iv) if COMPUTE_IV_RANK else float("nan")
 
@@ -727,6 +734,7 @@ def scan_ticker(symbol: str) -> tuple[Optional[PutRow], Counter]:
                 pcr=pcr,
                 rr_25d_pct=skew_m.rr_25d_pct,
                 score=_r(sc, 1),
+                ev=_r(ev, 2),
                 **long_extras,
             )
 

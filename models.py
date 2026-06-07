@@ -62,3 +62,10 @@ class PutRow:
     width:       Optional[float] = None   # short_strike - long_strike
     credit:      Optional[float] = None   # short_bid - long_ask, per share
     max_loss:    Optional[float] = None   # (width - credit) * 100, per contract
+
+    # ── Expected value (binary, per contract, in $) ─────────────────────────
+    # EV = P × max_gain - (1 - P) × max_loss, where P = profit_prob/100.
+    # For CSP max_gain = bid×100 and max_loss = (strike − bid)×100 (stock→0
+    # worst case — conservative). For BPS the defined max_loss is used so
+    # the number is realistic. Positive EV ≈ trade beats its own breakeven P.
+    ev: Optional[float] = None
