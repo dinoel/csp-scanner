@@ -258,6 +258,11 @@ const COLUMNS = [
   { key: "exp",      label: "Exp",     kind: "exp",                          group: "opt" },
   { key: "dte",      label: "DTE",                                            group: "opt" },
   { key: "strike",   label: "Strike",  fmt: v => "$" + v.toFixed(0),         group: "opt" },
+  // ── BPS-only columns (shown only when meta.strategy === "bps") ──
+  { key: "longK",    label: "Long K",  fmt: v => "$" + v.toFixed(0),         group: "opt", strategy: "bps" },
+  { key: "width",    label: "Width",   fmt: v => "$" + v.toFixed(0),         group: "opt", strategy: "bps" },
+  { key: "credit",   label: "Credit",  fmt: v => "$" + v.toFixed(2),         group: "opt", strategy: "bps" },
+  { key: "maxLoss",  label: "Max Loss",fmt: v => "$" + v.toFixed(0),         group: "opt", strategy: "bps" },
   { key: "mnessPct", label: "Mness",   kind: "signed", suffix: "%",          group: "opt" },
   { key: "emPct",    label: "EM%",     fmt: v => v.toFixed(2) + "%",         group: "opt", defaultHidden: true },
   { key: "vsEm",     label: "vs EM",   fmt: v => v.toFixed(1),               group: "opt", defaultHidden: true },
@@ -305,7 +310,11 @@ const COL_DESC = {
   ma200:     "% spot is above/below the 200-day moving average. Positive = uptrend.",
   exp:       "Option expiration date.",
   dte:       "Days to expiration.",
-  strike:    "Put strike price.",
+  strike:    "Put strike price (for BPS: the SHORT leg strike — the put you sell).",
+  longK:     "Long-leg strike of the bull put spread (the put you buy, further OTM).",
+  width:     "Spread width = short_strike − long_strike, in $.",
+  credit:    "Net credit received per share = short_bid − long_ask.",
+  maxLoss:   "Maximum loss per contract = (width − credit) × 100 = collateral required.",
   mnessPct:  "Moneyness % = (strike − spot) / spot × 100. Negative = OTM put.",
   emPct:     "Expected move % until expiry, derived from the ATM straddle.",
   vsEm:      "Strike distance vs expected move. >100 = strike sits beyond 1σ implied move (safer).",
@@ -479,11 +488,15 @@ function ScannerApp() {
     return m;
   }, []);
 
+  const strategy = (meta.strategy || "csp").toLowerCase();
   const visibleColumns = useMemo(
     () => colOrder
       .map(k => colByKey[k])
-      .filter(c => c && (c.always || !hiddenCols.has(c.key))),
-    [colOrder, colByKey, hiddenCols]
+      .filter(c => c
+        && (c.always || !hiddenCols.has(c.key))
+        // Strategy-tagged columns only appear when their strategy is active.
+        && (!c.strategy || c.strategy === strategy)),
+    [colOrder, colByKey, hiddenCols, strategy]
   );
 
   const tabSet = useMemo(() => new Set(tabs[activeTab] || []), [tabs, activeTab]);
@@ -683,6 +696,7 @@ function ScannerApp() {
         <div className="crit-cell"><span className="crit-label">Vol ≥</span><span className="crit-val">{meta.volMin}</span></div>
         <div className="crit-cell"><span className="crit-label">Spread ≤</span><span className="crit-val">{meta.spreadMaxPct}%</span></div>
         <div className="crit-cell"><span className="crit-label">Profile</span><span className="crit-val">{profile}</span></div>
+        <div className="crit-cell"><span className="crit-label">Strategy</span><span className="crit-val">{strategy.toUpperCase()}</span></div>
         <div className="crit-cell"><span className="crit-label">Sort</span><span className="crit-val">{sortKey} {sortDir === "asc" ? "↑" : "↓"}</span></div>
       </section>
 

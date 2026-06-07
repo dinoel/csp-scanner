@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass
@@ -46,3 +47,18 @@ class PutRow:
     rr_25d_pct:    float      # 25-delta risk reversal normalised (%) — put skew
     score: float          # composite score (higher = better)
     company_name: str = ""  # longName from yfinance; "" if unavailable
+
+    # ── Bull Put Spread extras (None when single-leg CSP) ──────────────────
+    # When present, this row represents a vertical bull put spread:
+    #   sell put @ `strike`     (the short leg — uses bid/ask/delta/iv as-is)
+    #   buy  put @ `long_strike` (the long leg, OTM further)
+    # `ret` / `ann_rtn` / `profit_prob` are recomputed on margin (max_loss),
+    # so the existing display columns work without changes.
+    long_strike: Optional[float] = None
+    long_bid:    Optional[float] = None
+    long_ask:    Optional[float] = None
+    long_delta:  Optional[float] = None
+    long_iv:     Optional[float] = None
+    width:       Optional[float] = None   # short_strike - long_strike
+    credit:      Optional[float] = None   # short_bid - long_ask, per share
+    max_loss:    Optional[float] = None   # (width - credit) * 100, per contract

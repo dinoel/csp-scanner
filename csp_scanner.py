@@ -76,6 +76,9 @@ from report import RATING_ABBREV, build_profile_block, write_scan_bundle
 UNIVERSE: str | list[str] = "screener"
 SAMPLE_SIZE: int | None = None        # tickers to sample; None = full universe
 RISK_PROFILE = "medium"              # "low" | "medium" | "high"
+STRATEGY     = os.getenv("STRATEGY", "csp").lower()  # "csp" | "bps"  (env-overridable)
+BPS_MAX_WIDTH = 20.0   # widest bull put spread (long-leg distance, $) considered
+BPS_MIN_CREDIT = 0.05  # require at least this much credit per share
 RISK_FREE_RATE = 0.05
 MIN_BID = 0.05
 COMPUTE_IV_RANK = True
@@ -368,6 +371,122 @@ def find_best_put(puts: pd.DataFrame, spot: float, T: float, r: float,
     return best, stats
 
 
+def find_best_bps(puts: pd.DataFrame, spot: float, T: float, r: float,
+                  ma200: float, em: float) -> tuple[Optional[dict], Counter]:
+    """Find the best bull put spread (short put A + long put B, B further OTM).
+
+    Returns (best_dict | None, stats). `best_dict` keys: short_strike,
+    short_bid, short_ask, short_iv, short_delta, short_vol, short_oi,
+    long_strike, long_bid, long_ask, long_iv, long_delta, width, credit,
+    max_loss (per contract), ret_pct (return on margin), ann_rtn, profit_prob.
+    """
+    best = None
+    best_score = float("-inf")
+    dte = max(T * 365.0, 1.0)
+    stats: Counter = Counter()
+
+    oi_unavailable = (
+        "openInterest" in puts.columns
+        and len(puts) > 0
+        and float(puts["openInterest"].fillna(0).max() or 0) == 0
+    )
+    if oi_unavailable:
+        stats["oi_unavailable"] += 1
+
+    _need = [c for c in ("strike", "bid", "ask", "lastPrice", "volume",
+                         "openInterest", "lastTradeDate")
+             if c in puts.columns]
+    rows = puts[_need].to_dict("records")
+
+    # First pass: evaluate liquidity / IV / delta per strike and keep viable ones.
+    candidates: list[dict] = []
+    for row in rows:
+        stats["examined"] += 1
+        price_iv, bid_ret, reason = _effective_price(row, oi_unavailable=oi_unavailable)
+        if reason:
+            stats[reason] += 1
+            continue
+        strike = float(row["strike"])
+        iv = analytics.compute_iv(spot, strike, T, r, price_iv)
+        if math.isnan(iv):
+            stats["iv_solve"] += 1
+            continue
+        delta = analytics.bs_put_delta(spot, strike, T, r, iv)
+        if math.isnan(delta):
+            stats["delta_out"] += 1
+            continue
+        candidates.append({
+            "strike": strike,
+            "bid":    bid_ret,
+            "ask":    float(row.get("ask") or 0),
+            "iv":     iv,
+            "delta":  delta,
+            "vol":    _int(row.get("volume")),
+            "oi":     _int(row.get("openInterest")),
+        })
+    candidates.sort(key=lambda c: c["strike"])
+
+    # Second pass: pair each candidate short leg with every long leg below it.
+    for i, short in enumerate(candidates):
+        if not (DELTA_MIN <= abs(short["delta"]) <= DELTA_MAX):
+            stats["delta_out"] += 1
+            continue
+        if MAX_STRIKE and short["strike"] > MAX_STRIKE:
+            stats["strike_max"] += 1
+            continue
+        for j in range(i - 1, -1, -1):
+            long_leg = candidates[j]
+            width = short["strike"] - long_leg["strike"]
+            if width <= 0:
+                continue
+            if width > BPS_MAX_WIDTH:
+                break  # further longs are only wider; abort
+            # Long ask must exist (we buy at ask).
+            if long_leg["ask"] <= 0:
+                continue
+            credit = short["bid"] - long_leg["ask"]
+            if credit < BPS_MIN_CREDIT:
+                continue
+            max_loss = (width - credit) * 100.0
+            if max_loss <= 0:
+                continue
+            ret_pct = credit / (width - credit) * 100.0     # return on margin per cycle
+            ann     = ret_pct * (365.0 / dte)
+            be      = short["strike"] - credit
+            pp      = analytics.calc_profit_prob(spot, be, T, r, short["iv"])
+            vs_em   = (spot - short["strike"]) / em * 100.0 if (not math.isnan(em) and em > 0) else float("nan")
+            ma_sc   = analytics.ma200_score(spot, short["strike"], ma200)
+            sc      = score_put(ann, pp, vs_em, ma_sc)
+
+            stats["considered"] += 1
+            if sc > best_score:
+                best_score = sc
+                best = {
+                    "short_strike": short["strike"],
+                    "short_bid":    short["bid"],
+                    "short_ask":    short["ask"],
+                    "short_iv":     short["iv"],
+                    "short_delta":  short["delta"],
+                    "short_vol":    short["vol"],
+                    "short_oi":     short["oi"],
+                    "long_strike":  long_leg["strike"],
+                    "long_bid":     long_leg["bid"],
+                    "long_ask":     long_leg["ask"],
+                    "long_iv":      long_leg["iv"],
+                    "long_delta":   long_leg["delta"],
+                    "width":        width,
+                    "credit":       credit,
+                    "max_loss":     max_loss,
+                    "ret_pct":      ret_pct,
+                    "ann_rtn":      ann,
+                    "profit_prob":  pp,
+                    "be":           be,
+                    "vs_em":        vs_em,
+                    "score":        sc,
+                }
+    return best, stats
+
+
 def _fmt_reject_stats(stats: Counter) -> str:
     """Format a Counter of rejection reasons as a one-line, sorted breakdown."""
     parts = []
@@ -507,30 +626,65 @@ def scan_ticker(symbol: str) -> tuple[Optional[PutRow], Counter]:
             pcr  = _r(put_vol / call_vol, 2) if call_vol > 0 else float("nan")
             skew_m = skewlib.compute_skew(calls, puts, spot, T, RISK_FREE_RATE)
 
-            result, stats = find_best_put(puts, spot, T, RISK_FREE_RATE, ma200, em)
+            if STRATEGY == "bps":
+                result, stats = find_best_bps(puts, spot, T, RISK_FREE_RATE, ma200, em)
+            else:
+                result, stats = find_best_put(puts, spot, T, RISK_FREE_RATE, ma200, em)
             agg.update(stats)
             agg["examined_expiries"] += 1
             if result is None:
                 log.debug(f"[{symbol}] {expiry}: no qualifying put — {_fmt_reject_stats(stats)}")
                 continue
 
-            strike, iv, bid, ask, vol, oi, delta = result
-            spread = _r(ask - bid) if (ask > 0 and bid > 0) else float("nan")
-
-            moneyness = (strike - spot) / spot * 100.0
-            be        = strike - bid
-            pct_be    = (spot - be) / spot * 100.0
-            ret       = bid / strike * 100.0
-            ann       = ret * (365.0 / dte)
-            pp        = analytics.calc_profit_prob(spot, strike, T, RISK_FREE_RATE, iv)
-            theta     = -analytics.bs_put_theta(spot, strike, T, RISK_FREE_RATE, iv)
-            em_pct    = em / spot * 100.0 if not math.isnan(em) else float("nan")
-            vs_em     = (spot - strike) / em * 100.0 if (not math.isnan(em) and em > 0) else float("nan")
-            ivr       = analytics.get_iv_rank(hist, iv) if COMPUTE_IV_RANK else float("nan")
-            ma_sc     = analytics.ma200_score(spot, strike, ma200)
             expiry_dt = datetime.strptime(expiry, "%Y-%m-%d").date()
             earn      = check_earnings(cal, today, expiry_dt)
-            sc        = score_put(ann, pp, vs_em, ma_sc, fund.score)
+            em_pct    = em / spot * 100.0 if not math.isnan(em) else float("nan")
+
+            if STRATEGY == "bps":
+                # `result` is a dict from find_best_bps
+                b = result
+                strike      = b["short_strike"]
+                bid         = b["short_bid"]
+                ask         = b["short_ask"]
+                vol, oi     = b["short_vol"], b["short_oi"]
+                iv, delta   = b["short_iv"], b["short_delta"]
+                spread      = _r(ask - bid) if (ask > 0 and bid > 0) else float("nan")
+                moneyness   = (strike - spot) / spot * 100.0
+                be          = b["be"]
+                pct_be      = (spot - be) / spot * 100.0
+                ret         = b["ret_pct"]
+                ann         = b["ann_rtn"]
+                pp          = b["profit_prob"]
+                vs_em       = b["vs_em"]
+                theta       = -analytics.bs_put_theta(spot, strike, T, RISK_FREE_RATE, iv) \
+                              + analytics.bs_put_theta(spot, b["long_strike"], T, RISK_FREE_RATE, b["long_iv"])
+                sc          = b["score"]
+                long_extras = dict(
+                    long_strike = round(b["long_strike"], 2),
+                    long_bid    = round(b["long_bid"], 2),
+                    long_ask    = round(b["long_ask"], 2),
+                    long_delta  = _r(b["long_delta"], 3),
+                    long_iv     = _r(b["long_iv"] * 100, 1),
+                    width       = _r(b["width"], 2),
+                    credit      = _r(b["credit"], 2),
+                    max_loss    = _r(b["max_loss"], 2),
+                )
+            else:
+                strike, iv, bid, ask, vol, oi, delta = result
+                spread      = _r(ask - bid) if (ask > 0 and bid > 0) else float("nan")
+                moneyness   = (strike - spot) / spot * 100.0
+                be          = strike - bid
+                pct_be      = (spot - be) / spot * 100.0
+                ret         = bid / strike * 100.0
+                ann         = ret * (365.0 / dte)
+                pp          = analytics.calc_profit_prob(spot, strike, T, RISK_FREE_RATE, iv)
+                theta       = -analytics.bs_put_theta(spot, strike, T, RISK_FREE_RATE, iv)
+                vs_em       = (spot - strike) / em * 100.0 if (not math.isnan(em) and em > 0) else float("nan")
+                ma_sc       = analytics.ma200_score(spot, strike, ma200)
+                sc          = score_put(ann, pp, vs_em, ma_sc, fund.score)
+                long_extras = {}
+
+            ivr = analytics.get_iv_rank(hist, iv) if COMPUTE_IV_RANK else float("nan")
 
             row = PutRow(
                 symbol=symbol,
@@ -573,6 +727,7 @@ def scan_ticker(symbol: str) -> tuple[Optional[PutRow], Counter]:
                 pcr=pcr,
                 rr_25d_pct=skew_m.rr_25d_pct,
                 score=_r(sc, 1),
+                **long_extras,
             )
 
             if sc > best_score:
@@ -941,7 +1096,7 @@ def _run_profile(tickers: list[str], profile: str, scan_data: dict) -> int:
     scan_data[profile] = build_profile_block(
         df, config_str, failed,
         ai_text=ai_text, ai_top_n=AI_TOP_N,
-        profile=profile, index_href="../index.html",
+        profile=profile, index_href="../index.html", strategy=STRATEGY,
     )
     return len(df)
 

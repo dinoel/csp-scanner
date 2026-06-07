@@ -172,6 +172,15 @@ def _row_to_js(rec: dict) -> dict:
         "annRtn":    _safe_float(rec.get("ann_rtn")),
         "pProb":     _safe_float(rec.get("pProb")) if "pProb" in rec else _safe_float(rec.get("profit_prob")),
         "ma200":     _safe_float(rec.get("ma200_pct")),
+        # ── Bull put spread extras (null for single-leg CSP rows) ──
+        "longK":     _safe_float(rec.get("long_strike")),
+        "longBid":   _safe_float(rec.get("long_bid")),
+        "longAsk":   _safe_float(rec.get("long_ask")),
+        "longDelta": _safe_float(rec.get("long_delta")),
+        "longIv":    _safe_float(rec.get("long_iv")),
+        "width":     _safe_float(rec.get("width")),
+        "credit":    _safe_float(rec.get("credit")),
+        "maxLoss":   _safe_float(rec.get("max_loss")),
     }
 
 
@@ -179,10 +188,12 @@ def _build_scan_meta(df: pd.DataFrame, *, profile: str | None, generated: str,
                      universe: str | None, dte_min, dte_max,
                      delta_min, delta_max, strike_max, vol_min, spread_max_pct,
                      index_href: str | None,
-                     failed: list[str]) -> dict:
+                     failed: list[str],
+                     strategy: str = "csp") -> dict:
     return {
         "universe":     universe or "—",
         "profile":      profile or "medium",
+        "strategy":     strategy,
         "dteMin":       dte_min, "dteMax": dte_max,
         "deltaMin":     delta_min, "deltaMax": delta_max,
         "strikeMax":    strike_max,
@@ -250,12 +261,15 @@ def _parse_meta_from_config(config_str: str) -> dict:
 def build_profile_block(df: pd.DataFrame, config_str: str, failed: list,
                         ai_text: str | None = None, ai_top_n: int = 10,
                         profile: str | None = None,
-                        index_href: str | None = None) -> dict:
+                        index_href: str | None = None,
+                        strategy: str = "csp") -> dict:
     """Build the JS-shaped data block for one profile.
 
     Returns `{"meta": {...}, "rows": [...], "tabs": {...}, "ai": {...}|None}`.
-    Pure: does not touch the filesystem. Caller accumulates blocks across
-    profiles and hands them to `write_scan_bundle`.
+    `strategy` is stored in meta.strategy so the UI can adapt (show extra
+    BPS columns when "bps", etc.). Pure: does not touch the filesystem.
+    Caller accumulates blocks across profiles and hands them to
+    `write_scan_bundle`.
     """
     parsed = _parse_meta_from_config(config_str)
     profile = profile or parsed["profile"] or "medium"
@@ -274,6 +288,7 @@ def build_profile_block(df: pd.DataFrame, config_str: str, failed: list,
             spread_max_pct=parsed["spread_max_pct"],
             index_href=index_href,
             failed=failed,
+            strategy=strategy,
         ),
         "rows": [_row_to_js(rec) for rec in df.to_dict("records")],
         "tabs": _build_scan_tabs(df),
