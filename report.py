@@ -182,6 +182,9 @@ def _row_to_js(rec: dict) -> dict:
         "credit":    _safe_float(rec.get("credit")),
         "maxLoss":   _safe_float(rec.get("max_loss")),
         "ev":        _safe_float(rec.get("ev")),
+        "evHv30":    _safe_float(rec.get("ev_hv30")),
+        "evMid":     _safe_float(rec.get("ev_mid")),
+        "evManaged": _safe_float(rec.get("ev_managed")),
     }
 
 

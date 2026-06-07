@@ -167,6 +167,14 @@ def _r(x, n: int = 2) -> float:
         return float("nan")
 
 
+def _ev_binary(p_pct: float, gain: float, loss: float) -> float:
+    """Binary expected value: P × max_gain − (1 − P) × max_loss. NaN-safe."""
+    if any(math.isnan(v) for v in (p_pct, gain, loss)):
+        return float("nan")
+    p = p_pct / 100.0
+    return p * gain - (1.0 - p) * loss
+
+
 # ── Trade-date staleness ─────────────────────────────────────────────────────
 
 def _last_valid_trade_date(_now: datetime | None = None) -> date:
@@ -698,8 +706,36 @@ def scan_ticker(symbol: str) -> tuple[Optional[PutRow], Counter]:
                 long_extras = {}
                 # Binary EV for CSP — pessimistic since max_loss assumes stock→0.
                 max_gain    = bid * 100.0
-                max_loss    = (strike - bid) * 100.0
-                ev          = (pp / 100.0) * max_gain - (1.0 - pp / 100.0) * max_loss
+                max_loss_csp = (strike - bid) * 100.0
+                ev          = _ev_binary(pp, max_gain, max_loss_csp)
+
+            # ── EV variants (HV30, mid-price, 50%-managed) ─────────────────
+            hv30_frac = hv30 / 100.0 if not math.isnan(hv30) else float("nan")
+            T_half    = T / 2.0
+            if STRATEGY == "bps":
+                be_short  = b["be"]
+                short_iv  = b["short_iv"]
+                p_hv30    = (analytics.calc_profit_prob(spot, be_short, T, RISK_FREE_RATE, hv30_frac)
+                             if not math.isnan(hv30_frac) else float("nan"))
+                p_half    = (analytics.calc_profit_prob(spot, be_short, T_half, RISK_FREE_RATE, short_iv)
+                             if T_half > 0 else float("nan"))
+                # Mid-price credit: bid+ask / 2 for short, same for long
+                sm = (b["short_bid"] + b["short_ask"]) / 2.0 if (b["short_bid"] > 0 and b["short_ask"] > 0) else b["short_bid"]
+                lm = (b["long_bid"]  + b["long_ask"])  / 2.0 if (b["long_bid"]  > 0 and b["long_ask"]  > 0) else b["long_ask"]
+                credit_mid   = max(0.0, sm - lm)
+                max_loss_mid = (b["width"] - credit_mid) * 100.0 if credit_mid < b["width"] else b["max_loss"]
+                ev_hv30      = _ev_binary(p_hv30, b["credit"] * 100.0, b["max_loss"])
+                ev_mid       = _ev_binary(pp,     credit_mid * 100.0,  max_loss_mid)
+                ev_managed   = _ev_binary(p_half, b["credit"] * 50.0,  b["max_loss"])
+            else:
+                p_hv30 = (analytics.calc_profit_prob(spot, strike, T, RISK_FREE_RATE, hv30_frac)
+                          if not math.isnan(hv30_frac) else float("nan"))
+                p_half = (analytics.calc_profit_prob(spot, strike, T_half, RISK_FREE_RATE, iv)
+                          if T_half > 0 else float("nan"))
+                mid    = (bid + ask) / 2.0 if (bid > 0 and ask > 0) else bid
+                ev_hv30    = _ev_binary(p_hv30, bid * 100.0, (strike - bid) * 100.0)
+                ev_mid     = _ev_binary(pp,     mid * 100.0, (strike - mid) * 100.0)
+                ev_managed = _ev_binary(p_half, bid * 50.0,  (strike - bid) * 100.0)
 
             ivr = analytics.get_iv_rank(hist, iv) if COMPUTE_IV_RANK else float("nan")
 
@@ -745,6 +781,9 @@ def scan_ticker(symbol: str) -> tuple[Optional[PutRow], Counter]:
                 rr_25d_pct=skew_m.rr_25d_pct,
                 score=_r(sc, 1),
                 ev=_r(ev, 2),
+                ev_hv30=_r(ev_hv30, 2),
+                ev_mid=_r(ev_mid, 2),
+                ev_managed=_r(ev_managed, 2),
                 **long_extras,
             )
 

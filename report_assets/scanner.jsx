@@ -281,8 +281,11 @@ const COLUMNS = [
   { key: "retPct",   label: "Ret%",    kind: "bar", barKind: "ret",  max: 6,   group: "ret" },
   { key: "annRtn",   label: "AnnRtn%", kind: "bar", barKind: "rtn",  max: 60,  group: "ret" },
   { key: "pProb",    label: "PProb%",  kind: "bar", barKind: "prob", max: 100, group: "ret" },
-  { key: "ev",       label: "EV $",    kind: "signed", suffix: "",            group: "ret" },
-  { key: "bePct",    label: "%BE",     fmt: v => v.toFixed(1) + "%",         group: "ret" },
+  { key: "ev",        label: "EV $",       kind: "signed", suffix: "",       group: "ret" },
+  { key: "evHv30",    label: "EV(HV30)",   kind: "signed", suffix: "",       group: "ret" },
+  { key: "evMid",     label: "EV(mid)",    kind: "signed", suffix: "",       group: "ret" },
+  { key: "evManaged", label: "EV(50%)",    kind: "signed", suffix: "",       group: "ret" },
+  { key: "bePct",     label: "%BE",        fmt: v => v.toFixed(1) + "%",     group: "ret" },
 ];
 
 const GROUP_LABELS = {
@@ -332,7 +335,10 @@ const COL_DESC = {
   retPct:    "One-period return = premium / strike, in %.",
   annRtn:    "Annualized return = Ret% × 365 / DTE.",
   pProb:     "Probability of expiring OTM (Black-Scholes), in %. Higher = safer trade.",
-  ev:        "Expected value per contract ($): P × max_gain − (1−P) × max_loss. For BPS uses the defined max loss; for CSP it's pessimistic (assumes stock→$0). Negative means the credit doesn't compensate for the asymmetric downside at this probability — even if probability of profit is high.",
+  ev:        "Baseline EV per contract ($): P (from IV) × max_gain − (1−P) × max_loss. Credit = bid (worst case fill). For BPS uses defined max loss; for CSP pessimistic (stock→$0).",
+  evHv30:    "EV using HV30 (realized vol) instead of IV for P. Captures the volatility risk premium — POSITIVE when IV > HV30 means you're selling overpriced premium and the real-world P is higher than the risk-neutral one priced into the option.",
+  evMid:     "EV assuming fills at mid-price instead of bid/ask worst case. Realistic for liquid spreads where you usually don't take the full slippage. Same P as baseline EV.",
+  evManaged: "EV under 50%-max-profit management: close at half DTE with half credit if profitable, full max loss if not. Higher P_half (less time to go wrong) compensates for the smaller gain — typical tasty-style mechanical edge.",
   bePct:     "% cushion between spot and break-even. Higher = more room before losing money.",
 };
 

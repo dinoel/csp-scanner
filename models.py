@@ -63,9 +63,16 @@ class PutRow:
     credit:      Optional[float] = None   # short_bid - long_ask, per share
     max_loss:    Optional[float] = None   # (width - credit) * 100, per contract
 
-    # ── Expected value (binary, per contract, in $) ─────────────────────────
-    # EV = P × max_gain - (1 - P) × max_loss, where P = profit_prob/100.
-    # For CSP max_gain = bid×100 and max_loss = (strike − bid)×100 (stock→0
-    # worst case — conservative). For BPS the defined max_loss is used so
-    # the number is realistic. Positive EV ≈ trade beats its own breakeven P.
-    ev: Optional[float] = None
+    # ── Expected value variants (binary, per contract, in $) ────────────────
+    # ev          : baseline (P uses IV, credit = bid; max_loss = nominal max)
+    # ev_hv30     : P uses HV30 instead of IV — captures vol risk premium.
+    #               POSITIVE when IV > HV30 (we're selling overpriced premium).
+    # ev_mid      : credit uses mid prices, not bid/ask worst case. Closer
+    #               to realistic fills on liquid spreads.
+    # ev_managed  : models closing at 50% max profit on half DTE — P_half is
+    #               higher (less time to go wrong), we take half_credit if
+    #               profitable, full max_loss if not. Tasty-style management.
+    ev:          Optional[float] = None
+    ev_hv30:     Optional[float] = None
+    ev_mid:      Optional[float] = None
+    ev_managed:  Optional[float] = None
