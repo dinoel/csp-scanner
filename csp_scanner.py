@@ -64,6 +64,7 @@ import analytics
 import fundamentals as _fund
 import sentiment as _sentiment
 import skew as skewlib
+import strategies as _strategies
 from ai import ai_analysis
 from cache import CACHE
 from models import PutRow
@@ -817,6 +818,129 @@ def scan_ticker(symbol: str) -> tuple[Optional[PutRow], Counter]:
     return best_row, agg
 
 
+# ── STRATEGY=ideas mode: enumerate many strategies per ticker ────────────────
+
+def scan_ticker_ideas(symbol: str) -> tuple[list, Counter]:
+    """Enumerate viable trades across every implemented strategy.
+
+    Returns (list[TradeIdea], stats). Each ticker contributes its top-K
+    ideas by annualized ROI on margin; caller aggregates and re-ranks.
+    """
+    agg: Counter = Counter()
+    log.debug(f"[{symbol}] fetching...")
+
+    meta = CACHE.fetch(f"fast_info:{symbol}", lambda: PROVIDER.get_spot_and_expirations(symbol))
+    spot = float(meta.get("price") or 0)
+    if not spot or math.isnan(spot) or spot <= 0:
+        log.info(f"[{symbol}] no spot price")
+        agg["no_spot"] += 1
+        return [], agg
+
+    today = datetime.now(timezone.utc).date()
+    expiries: list[tuple[int, str]] = []
+    for s in meta.get("options") or []:
+        try:
+            d = datetime.strptime(s, "%Y-%m-%d").date()
+            dte = (d - today).days
+            if DTE_MIN <= dte <= DTE_MAX:
+                expiries.append((dte, s))
+        except ValueError:
+            continue
+    if not expiries:
+        log.info(f"[{symbol}] no expiry in DTE range")
+        agg["no_expiry"] += 1
+        return [], agg
+
+    hist = CACHE.fetch(f"history:{symbol}", lambda: PROVIDER.get_history(symbol)) if COMPUTE_IV_RANK else None
+    hv30_pct = analytics.compute_hv30(hist) if hist is not None else float("nan")
+    hv30     = hv30_pct / 100.0 if not math.isnan(hv30_pct) else float("nan")
+
+    all_ideas: list = []
+    for dte, expiry in expiries:
+        try:
+            chain = CACHE.fetch(
+                f"options:{symbol}:{expiry}",
+                lambda e=expiry: PROVIDER.get_option_chain(symbol, e),
+            )
+            calls, puts = chain["calls"], chain["puts"]
+            T = dte / 365.0
+            agg["examined_expiries"] += 1
+
+            viable_puts = _strategies.find_candidate_legs(
+                puts, spot, T, RISK_FREE_RATE,
+                kind="put", eff_price_fn=_effective_price,
+                delta_min=DELTA_MIN, delta_max=DELTA_MAX,
+                max_strike=MAX_STRIKE,
+            )
+            viable_calls = _strategies.find_candidate_legs(
+                calls, spot, T, RISK_FREE_RATE,
+                kind="call", eff_price_fn=_effective_price,
+                delta_min=DELTA_MIN, delta_max=DELTA_MAX,
+                max_strike=None,  # no cap on call strikes (could add)
+            )
+            agg["puts_viable"]  += len(viable_puts)
+            agg["calls_viable"] += len(viable_calls)
+            if not viable_puts and not viable_calls:
+                continue
+
+            ideas = _strategies.scan_all(
+                viable_puts, viable_calls,
+                symbol=symbol, expiry=expiry, dte=dte, spot=spot,
+                hv30=hv30, delta_min=DELTA_MIN, delta_max=DELTA_MAX,
+                max_width=BPS_MAX_WIDTH, min_credit=BPS_MIN_CREDIT,
+                r=RISK_FREE_RATE,
+            )
+            all_ideas.extend(ideas)
+            agg["ideas_examined"] += len(ideas)
+        except Exception as e:
+            log.error(f"[{symbol}] {expiry}: {e!r}")
+            agg["exception"] += 1
+            continue
+
+    # Keep top-K per ticker by roi_ann to bound global memory.
+    valid = [i for i in all_ideas if not math.isnan(i.roi_ann) and not math.isinf(i.max_loss)]
+    valid.sort(key=lambda i: i.roi_ann, reverse=True)
+    top = valid[:20]
+    if top:
+        log.info(f"[{symbol}] {len(all_ideas)} ideas examined, "
+                 f"top {len(top)} kept. Best ROI={top[0].roi_ann:+.1f}%/yr "
+                 f"({top[0].strategy} {top[0].leg_label()})")
+    else:
+        log.info(f"[{symbol}] no ideas produced (examined {len(all_ideas)})")
+    return top, agg
+
+
+def print_top_ideas(ideas: list, n: int = 50) -> None:
+    """Print top-N trade ideas as an ASCII table."""
+    if not ideas:
+        log.warning("No trade ideas to display.")
+        return
+    head = (
+        f"\n{'='*132}\n"
+        f"Top {min(n, len(ideas))} trade ideas across universe (ranked by EV(mid) annualized ROI on margin)\n"
+        f"{'='*132}\n"
+        f"  # │ Sym    │ Strat       │ Exp        DTE │ Legs                              "
+        f"│   Cr$ │  Max$ │  P%  │ P(HV)% │  EVmid$ │  EVhv30 │  EV50%$ │   ROI%/y\n"
+        f"────┼────────┼─────────────┼────────────────┼───────────────────────────────────"
+        f"┼───────┼───────┼──────┼────────┼─────────┼─────────┼─────────┼──────────"
+    )
+    log.info(head)
+    for rank, idea in enumerate(ideas[:n], start=1):
+        legs_str = idea.leg_label()
+        # Truncate legs string to fit column
+        if len(legs_str) > 33:
+            legs_str = legs_str[:30] + "..."
+        log.info(
+            f" {rank:>2} │ {idea.symbol:<6} │ {idea.strategy:<11} │ "
+            f"{idea.expiry:<10} {idea.dte:>3} │ {legs_str:<33} │ "
+            f"{idea.credit:>5.0f} │ {idea.max_loss:>5.0f} │ "
+            f"{idea.p_profit:>4.1f} │ {idea.p_profit_hv30:>6.1f} │ "
+            f"{idea.ev_mid:>+7.2f} │ {idea.ev_hv30:>+7.2f} │ {idea.ev_managed:>+7.2f} │ "
+            f"{idea.roi_ann:>+8.1f}"
+        )
+    log.info("=" * 132 + "\n")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def _scan_link(folder: str, profile: str) -> str:
@@ -901,8 +1025,6 @@ def main():
 
     results_root = Path(RESULTS_DIR)
     scan_ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
-    scan_dir = results_root / scan_ts
-    scan_dir.mkdir(parents=True, exist_ok=True)
 
     counts: dict[str, int] = {}
     scan_data: dict[str, dict] = {}
@@ -914,6 +1036,12 @@ def main():
         log.info("#" * 70)
         counts[profile_name] = _run_profile(tickers, profile_name, scan_data)
 
+    # Ideas mode is console-only — skip HTML / data.js / index updates.
+    if STRATEGY == "ideas":
+        return
+
+    scan_dir = results_root / scan_ts
+    scan_dir.mkdir(parents=True, exist_ok=True)
     if scan_data:
         write_scan_bundle(scan_dir, scan_data)
 
@@ -929,9 +1057,42 @@ def main():
 def _run_profile(tickers: list[str], profile: str, scan_data: dict) -> int:
     log.info(
         f"Scanning {len(tickers)} tickers  |  profile={RISK_PROFILE.upper()}  "
-        f"|  DTE {DTE_MIN}-{DTE_MAX}  |  |Δ| {DELTA_MIN}-{DELTA_MAX}  "
-        f"|  strike≤{MAX_STRIKE}  |  vol≥{MIN_VOLUME}  spread≤{MAX_SPREAD_PCT:.0%}\n"
+        f"|  STRATEGY={STRATEGY}  |  DTE {DTE_MIN}-{DTE_MAX}  |  "
+        f"|Δ| {DELTA_MIN}-{DELTA_MAX}  |  strike≤{MAX_STRIKE}  |  "
+        f"vol≥{MIN_VOLUME}  spread≤{MAX_SPREAD_PCT:.0%}\n"
     )
+
+    # ── STRATEGY=ideas: multi-strategy trade-idea generator ──────────────────
+    if STRATEGY == "ideas":
+        all_ideas: list = []
+        failed: list[str] = []
+        global_stats: Counter = Counter()
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+            futures = {pool.submit(scan_ticker_ideas, sym): sym for sym in tickers}
+            for fut in as_completed(futures):
+                sym = futures[fut]
+                try:
+                    ideas, stats = fut.result()
+                    global_stats.update(stats)
+                    all_ideas.extend(ideas)
+                except Exception as e:
+                    msg = str(e)
+                    if "Rate" in msg or "429" in msg:
+                        log.warning(f"[{sym}] rate limited — skipping")
+                        failed.append(sym)
+                    else:
+                        log.error(f"[{sym}] error: {e!r}")
+        # Global ranking by annualized ROI on margin
+        all_ideas.sort(key=lambda i: i.roi_ann, reverse=True)
+        log.info(
+            f"\nIdeas summary: {len(all_ideas):,} kept across {len(tickers)} tickers. "
+            f"Examined puts={global_stats.get('puts_viable', 0):,} "
+            f"calls={global_stats.get('calls_viable', 0):,} "
+            f"raw ideas={global_stats.get('ideas_examined', 0):,}. "
+            f"{len(failed)} skipped."
+        )
+        print_top_ideas(all_ideas, n=int(os.getenv("IDEAS_TOP_N", "50")))
+        return len(all_ideas)
 
     rows: list[PutRow] = []
     failed: list[str] = []

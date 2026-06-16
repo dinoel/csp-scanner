@@ -65,6 +65,40 @@ def compute_iv(S, K, T, r, price) -> float:
     return iv if 0.01 < iv < 5.0 else float("nan")
 
 
+# ── Call analogues (built from put functions via put-call parity) ─────────────
+
+def bs_call_price(S, K, T, r, sigma) -> float:
+    """BS call price = put_price + S − K × e^(-rT) (put-call parity)."""
+    p = bs_put_price(S, K, T, r, sigma)
+    if math.isnan(p):
+        return float("nan")
+    return p + S - K * math.exp(-r * T)
+
+
+def bs_call_delta(S, K, T, r, sigma) -> float:
+    """Call delta = put_delta + 1 = N(d1)."""
+    pd = bs_put_delta(S, K, T, r, sigma)
+    return pd + 1.0 if not math.isnan(pd) else float("nan")
+
+
+def bs_call_theta(S, K, T, r, sigma) -> float:
+    """Daily theta for a long call (negative). Via parity vs put."""
+    pt = bs_put_theta(S, K, T, r, sigma)
+    if math.isnan(pt):
+        return float("nan")
+    # parity: call_theta = put_theta - r×K×e^(-rT)/365
+    return pt - r * K * math.exp(-r * T) / 365
+
+
+def compute_iv_call(S, K, T, r, price) -> float:
+    """Call IV — invert to put via parity, then use put IV solver."""
+    # put = call − S + K × e^(-rT)
+    put_price = price - S + K * math.exp(-r * T)
+    if put_price <= 0:
+        return float("nan")
+    return compute_iv(S, K, T, r, put_price)
+
+
 def calc_profit_prob(S, K, T, r, iv) -> float:
     """Risk-neutral P(S_T > K) = N(d2); probability the put expires worthless."""
     if T <= 0 or iv <= 0:
