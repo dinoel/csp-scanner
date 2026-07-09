@@ -13,6 +13,8 @@ from .base import Leg, TradeIdea, analyze, numerical_ev, find_candidate_legs
 from .scanners import (
     scan_csps, scan_bps, scan_bcs,
     scan_iron_condors, scan_jade_lizards,
+    scan_put_ratios, scan_call_ratios,
+    scan_put_backspreads, scan_call_backspreads,
     scan_all,
 )
 
@@ -21,5 +23,7 @@ __all__ = [
     "analyze", "numerical_ev", "find_candidate_legs",
     "scan_csps", "scan_bps", "scan_bcs",
     "scan_iron_condors", "scan_jade_lizards",
+    "scan_put_ratios", "scan_call_ratios",
+    "scan_put_backspreads", "scan_call_backspreads",
     "scan_all",
 ]
