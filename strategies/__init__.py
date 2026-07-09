@@ -10,10 +10,16 @@ The scanner piece lives in `strategies.scanners`; each scanner enumerates
 viable strike combinations and returns `list[TradeIdea]`.
 """
 from .base import Leg, TradeIdea, analyze, numerical_ev, find_candidate_legs
-from .scanners import scan_csps, scan_bps, scan_jade_lizards, scan_all
+from .scanners import (
+    scan_csps, scan_bps, scan_bcs,
+    scan_iron_condors, scan_jade_lizards,
+    scan_all,
+)
 
 __all__ = [
     "Leg", "TradeIdea",
     "analyze", "numerical_ev", "find_candidate_legs",
-    "scan_csps", "scan_bps", "scan_jade_lizards", "scan_all",
+    "scan_csps", "scan_bps", "scan_bcs",
+    "scan_iron_condors", "scan_jade_lizards",
+    "scan_all",
 ]
