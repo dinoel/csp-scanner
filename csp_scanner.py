@@ -897,16 +897,36 @@ def scan_ticker_ideas(symbol: str) -> tuple[list, Counter]:
             agg["exception"] += 1
             continue
 
+    # Practical filters to weed out penny-picking trades:
+    #   IDEAS_MIN_WIDTH  — minimum strike spread ($) for multi-leg trades.
+    #                      Single-leg (csp) exempt.  Default $2.
+    #   IDEAS_MIN_EV_MID — minimum absolute EV(mid) per contract ($).
+    #                      Default $20.
+    min_width  = float(os.getenv("IDEAS_MIN_WIDTH",  "2.0"))
+    min_ev_mid = float(os.getenv("IDEAS_MIN_EV_MID", "20.0"))
+
+    def _passes_practical(idea) -> bool:
+        if math.isnan(idea.ev_mid) or idea.ev_mid < min_ev_mid:
+            return False
+        if len(idea.legs) > 1:
+            strikes = [L.strike for L in idea.legs]
+            if (max(strikes) - min(strikes)) < min_width:
+                return False
+        return True
+
     # Keep top-K per ticker by roi_ann to bound global memory.
-    valid = [i for i in all_ideas if not math.isnan(i.roi_ann) and not math.isinf(i.max_loss)]
+    valid = [i for i in all_ideas
+             if not math.isnan(i.roi_ann) and not math.isinf(i.max_loss)
+             and _passes_practical(i)]
     valid.sort(key=lambda i: i.roi_ann, reverse=True)
     top = valid[:20]
     if top:
-        log.info(f"[{symbol}] {len(all_ideas)} ideas examined, "
-                 f"top {len(top)} kept. Best ROI={top[0].roi_ann:+.1f}%/yr "
-                 f"({top[0].strategy} {top[0].leg_label()})")
+        log.info(f"[{symbol}] {len(all_ideas)} ideas examined, {len(valid)} passed practical filter "
+                 f"(width≥${min_width:g}, EV(mid)≥${min_ev_mid:g}), top {len(top)} kept. "
+                 f"Best ROI={top[0].roi_ann:+.1f}%/yr ({top[0].strategy} {top[0].leg_label()})")
     else:
-        log.info(f"[{symbol}] no ideas produced (examined {len(all_ideas)})")
+        log.info(f"[{symbol}] no ideas passed filter (examined {len(all_ideas)}, "
+                 f"width≥${min_width:g}, EV(mid)≥${min_ev_mid:g})")
     return top, agg
 
 
