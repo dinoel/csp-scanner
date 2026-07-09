@@ -940,6 +940,34 @@ def print_top_ideas(ideas: list, n: int = 50) -> None:
         )
     log.info("=" * 132 + "\n")
 
+    # ── Per-strategy top-3 breakdown ────────────────────────────────────────
+    by_strat: dict[str, list] = {}
+    for i in ideas:
+        by_strat.setdefault(i.strategy, []).append(i)
+    log.info(f"\n{'='*132}")
+    log.info(f"Per-strategy leaderboard (top 3 by ROI/yr, per strategy)")
+    log.info("=" * 132)
+    log.info(
+        f"Strategy         │ N     │ Best 3 candidates (sym / legs / credit / max_loss / P% / EV(mid) / ROI/yr)"
+    )
+    log.info("─" * 132)
+    for strat in sorted(by_strat, key=lambda s: -max((i.roi_ann for i in by_strat[s] if not math.isnan(i.roi_ann)), default=-1e18)):
+        picks = sorted(by_strat[strat], key=lambda i: (math.isnan(i.roi_ann), -i.roi_ann if not math.isnan(i.roi_ann) else 0))[:3]
+        n_strat = len(by_strat[strat])
+        for j, idea in enumerate(picks):
+            head = f"{strat:<16}" if j == 0 else " " * 16
+            n_str = f"{n_strat:<5}"    if j == 0 else " " * 5
+            legs = idea.leg_label()
+            if len(legs) > 30:
+                legs = legs[:27] + "..."
+            roi = f"{idea.roi_ann:+.1f}%/yr" if not math.isnan(idea.roi_ann) else "N/A (∞ loss)"
+            log.info(
+                f"{head} │ {n_str} │ {idea.symbol:<6} {legs:<32} cr=${idea.credit:>+5.0f} "
+                f"maxL=${idea.max_loss:>5.0f} P={idea.p_profit:>4.1f}% "
+                f"EVmid=${idea.ev_mid:>+7.2f}  {roi}"
+            )
+    log.info("=" * 132 + "\n")
+
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
