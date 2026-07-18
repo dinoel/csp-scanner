@@ -570,6 +570,28 @@ def get_tickers() -> list[str]:
         return get_candidates(max_price=MAX_STRIKE or 200, verbose=True)
     if UNIVERSE == "etf":
         return list(ETF_UNIVERSE)
+    if UNIVERSE == "ideas_wide":
+        # Wide universe for STRATEGY=ideas: screener (wider price band, no
+        # beta cap) + ETF list + hand-picked index/mega-cap names that the
+        # Yahoo equity screener misses (SPY/QQQ/IWM/etc are indexed products).
+        from screener import get_candidates
+        screened = get_candidates(
+            min_price=60, max_price=2000, min_avg_volume=2_000_000,
+            verbose=True,
+        )
+        # Index ETFs + high-vol names that skip the equity screener
+        HAND_PICKED = [
+            "SPY", "QQQ", "IWM", "DIA",     # broad-index ETFs
+            "SPX", "NDX", "RUT",             # index options (if traded)
+            "VIX", "UVXY",                   # vol products
+            "GLD", "SLV", "USO", "UNG",      # commodity ETFs
+            "TLT", "IEF", "HYG",             # bond ETFs
+            "MU", "AVGO", "SMCI",            # high-price semis often filtered out
+            "COIN", "MSTR",                  # crypto proxies
+        ]
+        # Merge, dedupe, preserve order (hand-picked first for stable rank display)
+        merged = list(dict.fromkeys(HAND_PICKED + list(ETF_UNIVERSE) + screened))
+        return merged
     raise ValueError(f"Unknown universe: {UNIVERSE!r}")
 
 
